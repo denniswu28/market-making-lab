@@ -14,6 +14,7 @@ fn prepare_backtest() -> Backtest<HashMapMarketDepth> {
     let sym  = "SOLUSDT";
     let date_from = 20240501;
     let date_to   = 20240531;
+    let date_sod = 20240430;
 
     let latency_data: Vec<_> = (date_from..=date_to)
         .map(|d| DataSource::File(format!("{base}/latency/{exch}/{sym}/latency_{d}.npz")))
@@ -29,7 +30,7 @@ fn prepare_backtest() -> Backtest<HashMapMarketDepth> {
 
     // If you have an SOD/EOD snapshot, set it here; otherwise you can skip apply_snapshot.
     // Example SOD snapshot path (optional):
-    let sod_path = format!("{base}/data/{exch}/{sym}/{sym}_20240430_SOD.npz");
+    let sod_path = format!("{base}/data/{exch}/{sym}/{sym}_{date_sod}_SOD.npz");
 
     let hbt = Backtest::builder()
         .add_asset(
