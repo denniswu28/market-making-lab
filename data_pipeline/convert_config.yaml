@@ -1,0 +1,49 @@
+# Where your parquet lives
+data_root: "/data/uni/crypto/parquet_tardis"
+
+# Where to write npz/npy
+output_root: "/data/tmp/tardis_bn_hft/data"
+
+tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
+keep_temps: false
+
+# Exchange & instruments
+exchange: "binance-futures"           # or "okex-swap"
+symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+
+# Dates to convert (either format is fine)
+dates: ["2024-05-01", "2024-05-02"]
+
+# Snapshot handling
+#   auto: process SOD on sod_date, ignore_sod otherwise
+#   process | ignore_sod | ignore to force same mode for all days
+snapshot_mode: "auto"
+sod_date: "2024-05-01"                # first backtest date
+
+# Use quotes/BBO ("book_ticker") to fuse with depth+trades
+use_quotes: false
+
+# Required when use_quotes = true (per-symbol)
+tick_size:
+  BTCUSDT: 0.1
+  ETHUSDT: 0.01
+  SOLUSDT: 0.0001
+  CRVUSDT: 0.0001
+
+lot_size:
+  BTCUSDT: 0.001
+  ETHUSDT: 0.001
+  SOLUSDT: 0.01
+  CRVUSDT: 0.1
+
+# hftbacktest conversion knobs
+num_proc: 2
+buffer_size: 200000000
+ss_buffer_size: 2000000
+base_latency: 0.0
+
+# Output format
+output_format: "npz"                  # or "npy"
+
+# Dangerous: delete raw input files after successful conversion
+delete_inputs_after: false

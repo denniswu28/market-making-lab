@@ -1,0 +1,54 @@
+# ===== Inputs =====
+data_root: "/data/uni/crypto/parquet_tardis"           # raw Tardis parquet
+feeds_output_root: "/data/tmp/tardis_bn_hft/data"      # converted feeds (npz)
+latency_output_root: "/data/tmp/tardis_bn_hft/latency" # derived latency (npz)
+
+tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
+keep_temps: false
+
+exchange: "binance-futures"
+symbols: ["ETHUSDT", "SOLUSDT"]
+
+# Dates: either explicit list OR range (inclusive)
+# dates: ["2024-05-01", "2024-05-02"]
+date_from: "2025-08-01"
+date_to:   "2025-08-05"
+
+# ===== Convert settings =====
+snapshot_mode: "auto"     # auto | process | ignore_sod | ignore
+sod_date: "2025-08-01"    # first backtest day (used by 'auto')
+
+use_quotes: false
+# If use_quotes: true, you must provide tick_size & lot_size per symbol
+tick_size:
+  BTCUSDT: 0.1
+  ETHUSDT: 0.01
+  SOLUSDT: 0.0001
+lot_size:
+  BTCUSDT: 0.001
+  ETHUSDT: 0.001
+  SOLUSDT: 0.01
+
+num_proc: 4
+buffer_size: 200000000
+ss_buffer_size: 2000000
+base_latency: 0.0
+
+output_format: "npz"          # MUST be 'npz' for latency step
+delete_inputs_after: false
+skip_existing_feed: true      # skip convert if feed npz already exists
+
+# ===== Latency settings =====
+bucket_every: "1000000i" # timestamp tick size
+
+# Order latency synthesis:  entry = mul_entry * feed_latency + offset_entry, resp = mul_resp * feed_latency + offset_resp
+mul_entry: 4
+mul_resp: 3
+offset_entry: 0
+offset_resp: 0
+
+include_symbol_dir: true
+latency_filename_template: "latency_{date}.npz"
+overwrite_latency: true
+
+# python data_pipeline/data_pipeline.py -c data_pipeline/pipeline.yaml

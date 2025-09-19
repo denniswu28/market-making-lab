@@ -1,0 +1,23 @@
+[package]
+name = "statmm"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "statmm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "statmm-bin"
+path = "src/main.rs"
+
+[dependencies]
+hftbacktest = { path = "../hftbacktest/hftbacktest" }
+tracing-subscriber = "0.3"
+
+[[example]]
+name = "gridtrading_backtest"
+path = "examples/gridtrading_backtest.rs"
+
+
+
