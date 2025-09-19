@@ -291,11 +291,11 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
-        for id in cancels { hbt.cancel(0, id, false).unwrap(); }
+        for id in cancels { let _ = hbt.cancel(0, id, false); }
         for (id, px) in posts {
-            hftbacktest::prelude::Bot::submit_buy_order(
+            let _ = hftbacktest::prelude::Bot::submit_buy_order(
                 hbt, 0, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false
-            ).unwrap();
+            );
         }
     }
     // SELL side
@@ -318,11 +318,11 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
-        for id in cancels { hbt.cancel(0, id, false).unwrap(); }
+        for id in cancels { let _ = hbt.cancel(0, id, false); }
         for (id, px) in posts {
-            hftbacktest::prelude::Bot::submit_sell_order(
+            let _ = hftbacktest::prelude::Bot::submit_sell_order(
                 hbt, 0, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false
-            ).unwrap();
+            );
         }
     }
     Ok(())
@@ -359,7 +359,7 @@ where
             *min_step,
             *skew,
             *order_qty,
-            *max_pos * *order_qty, // treat as number of lots
+            (*max_pos as f64) * *order_qty, // treat as number of lots
             *grid_num,
         )?;
     }
@@ -416,8 +416,8 @@ where
             let low_tick = ((mid * (1.0 - look_depth_pct)) / ts).floor() as i64;
             let high_tick = ((mid * (1.0 + look_depth_pct)) / ts).ceil() as i64;
 
-            let sum_bid = sum_bid_qty_down_to(&d, best_bid_tick, low_tick);
-            let sum_ask = sum_ask_qty_up_to(&d, best_ask_tick, high_tick);
+            let sum_bid = sum_bid_qty_down_to(d, best_bid_tick, low_tick);
+            let sum_ask = sum_ask_qty_up_to(d, best_ask_tick, high_tick);
             let raw = sum_bid - sum_ask;
             let alpha = if normalize {
                 let denom = (sum_bid + sum_ask).max(1e-12);
@@ -481,7 +481,7 @@ where
             if bb.is_nan() || ba.is_nan() { return f64::NAN; }
             let mid = 0.5 * (bb + ba) as f64;
 
-            let (bids, asks) = collect_levels_by_percent(&d, depth_pct);
+            let (bids, asks) = collect_levels_by_percent(d, depth_pct);
             let k = bids.len().min(asks.len());
             if k == 0 { return mid; }
 
@@ -560,8 +560,8 @@ where
             if bb.is_nan() || ba.is_nan() { return f64::NAN; }
             let mid = 0.5 * (bb + ba) as f64;
 
-            let (sum_pbqb, sum_qb) = collect_side_until_qty(&d, Side::Buy,  target_qty_per_side);
-            let (sum_paqa, sum_qa) = collect_side_until_qty(&d, Side::Sell, target_qty_per_side);
+            let (sum_pbqb, sum_qb) = collect_side_until_qty(d, Side::Buy,  target_qty_per_side);
+            let (sum_paqa, sum_qa) = collect_side_until_qty(d, Side::Sell, target_qty_per_side);
             let den = sum_qb + sum_qa;
             let wdp = if den > 0.0 { (sum_pbqb + sum_paqa) / den } else { mid };
 
@@ -628,7 +628,7 @@ where
             let mid = 0.5 * (bb + ba) as f64;
 
             // within pct band, compute effective side prices
-            let (bids, asks) = collect_levels_by_percent(&d, depth_pct);
+            let (bids, asks) = collect_levels_by_percent(d, depth_pct);
             let (mut sum_pbqb, mut sum_qb) = (0.0, 0.0);
             for (pb, qb) in &bids { sum_pbqb += pb * qb; sum_qb += qb; }
             let (mut sum_paqa, mut sum_qa) = (0.0, 0.0);

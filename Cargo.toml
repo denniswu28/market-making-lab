@@ -12,6 +12,7 @@ name = "statmm-bin"
 path = "src/main.rs"
 
 [dependencies]
+clap = {version = "4.5.47", features = ["derive"] }
 hftbacktest = { path = "../hftbacktest/hftbacktest" }
 tracing-subscriber = "0.3"
 
