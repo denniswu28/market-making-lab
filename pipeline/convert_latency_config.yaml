@@ -7,7 +7,7 @@ tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
 keep_temps: false
 
 exchange: "binance-futures"
-symbols: ["ETHUSDT", "SOLUSDT"]
+symbols: ["USDCUSDT", "SOLUSDT"]
 
 # Dates: either explicit list OR range (inclusive)
 # dates: ["2024-05-01", "2024-05-02"]
@@ -24,10 +24,13 @@ tick_size:
   BTCUSDT: 0.1
   ETHUSDT: 0.01
   SOLUSDT: 0.0001
+  USDCUSDT: 0.000001
 lot_size:
   BTCUSDT: 0.001
   ETHUSDT: 0.001
   SOLUSDT: 0.01
+  USDCUSDT: 1.0
+
 
 num_proc: 4
 buffer_size: 200000000

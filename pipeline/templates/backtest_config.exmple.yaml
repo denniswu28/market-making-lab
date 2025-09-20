@@ -1,0 +1,60 @@
+# Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
+base_root: "/data/tmp/tardis_bn_hft"
+exchange: "binance-futures"
+symbols: ["SOLUSDT", "BTCUSDT"]
+
+# Date range (inclusive)
+date_from: 20240501
+date_to:   20240531
+
+# Optional SOD snapshot (per symbol you can leave blank)
+initial_snapshot: null   # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
+
+# Path to compiled Rust binary (relative to repo root is fine)
+binary: "../target/release/gridtrading_backtest_args"
+
+# Parallelism
+num_proc: 4
+
+# Fees / Queue model
+fees:
+  maker: -0.00005
+  taker:  0.0007
+queue_power: 3.0
+
+# Tick/lot fallback if not in tickers.json (symbol lookup preferred)
+defaults:
+  tick_size: 0.01
+  lot_size: 0.001
+
+# Path to tickers.json (from your ticker.py; includes tick_size/lot_size/weighted_avg_price/min_qty)
+tickers_json: "./tickers.json"
+
+# Grid parameters (shared)
+grid:
+  relative_half_spread: 0.0005
+  relative_grid_interval: 0.0005
+  grid_num: 10
+  min_grid_step_override: null  # null => use tick_size
+  skew_override: null           # null => rel_half_spread / grid_num
+  order_value_usd: 100
+  max_position_in_grids: 10
+
+# Alpha/price model selection
+algo:
+  name: "obi-static-alpha"   # obi-static-alpha | vamp | weighted-depth | vamp-effective
+  params:
+    look_depth_pct: 0.025    # for obi-static-alpha
+    normalize: true          # for obi-static-alpha
+    alpha_scale: 160.0       # for obi-static-alpha
+    vamp_depth_pct: 0.02     # for vamp / vamp-effective
+    target_qty_per_side: 500 # for weighted-depth
+
+# Time-series transform
+transform:
+  kind: "zscore"       # none | sma | ema | zscore
+  window: 3600         # for sma/zscore
+  ema_alpha: 0.1       # for ema
+
+# Output
+out_path: "./out"      # CSVs per symbol are written here

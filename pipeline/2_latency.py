@@ -13,7 +13,7 @@ import polars as pl
 from numba import njit
 from tqdm.auto import tqdm
 
-# hftbacktest bitmasks
+from util.ticker_helper import fetch_binance_futures_info
 from hftbacktest import EXCH_EVENT, LOCAL_EVENT
 
 
@@ -197,7 +197,7 @@ def main():
     # Universe
     exchange: str = cfg["exchange"]
     symbols: List[str] = cfg.get("symbols") or []
-    symbol_single: Optional[str] = cfg.get("symbol")  # allow single symbol
+    symbol_single: Optional[str] = cfg.get("symbol")
     if not symbols and not symbol_single:
         raise ValueError("Provide either 'symbol' or 'symbols' in YAML.")
     if symbols and symbol_single:

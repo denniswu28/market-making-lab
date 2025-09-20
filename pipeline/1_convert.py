@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import polars as pl
 from tqdm.auto import tqdm
 from hftbacktest.data.utils import tardis  # tardis.convert / tardis.convert_fuse
-
+from util.ticker_helper import fetch_binance_futures_info
 
 # ---------------------------- schema helpers ----------------------------
 
@@ -292,6 +292,7 @@ def _convert_one(j: Job) -> Tuple[str, str, Optional[str], List[str]]:
 def main():
     parser = argparse.ArgumentParser(description="Convert Tardis parquet to hftbacktest npz/npy (adds dummy exchange/symbol).")
     parser.add_argument("-c", "--config", required=True, help="Path to YAML config")
+    parser.add_argument("--proxy", default="socks5h://127.0.0.1:1080", help="Proxy for Binance REST, e.g. socks5h://127.0.0.1:1080")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -312,6 +313,20 @@ def main():
     use_quotes: bool = bool(cfg.get("use_quotes", False))
     tick_size_map: Dict[str, float] = cfg.get("tick_size", {}) or {}
     lot_size_map: Dict[str, float] = cfg.get("lot_size", {}) or {}
+
+    missing = [s for s in symbols if (s not in tick_size_map or s not in lot_size_map)]
+    if use_quotes and missing:
+        fetched = fetch_binance_futures_info(missing, proxy=args.proxy)
+        for s in missing:
+            ent = fetched.get(s)
+            if ent:
+                # only fill missing
+                if s not in tick_size_map and "tick_size" in ent:
+                    tick_size_map[s] = float(ent["tick_size"])
+                if s not in lot_size_map and "lot_size" in ent:
+                    lot_size_map[s] = float(ent["lot_size"])
+            else:
+                print(f"[WARN] No ticker info for {s}; convert_fuse may fail without tick/lot.")
 
     num_proc: int = int(cfg.get("num_proc", max(1, mp.cpu_count() // 2)))
     buffer_size: int = int(cfg.get("buffer_size", 100_000_000))

@@ -1,63 +1,30 @@
-from datetime import datetime
+# pipeline/0_ticker.py
+from __future__ import annotations
+import argparse, json, pprint, sys
+from util.ticker_utils import fetch_binance_futures_info
 
-import requests
-import json
-import pprint
-import sys
+def main():
+    p = argparse.ArgumentParser(description="Fetch Binance Futures tickers.")
+    p.add_argument("--proxy", default="socks5h://127.0.0.1:1080", help="socks5h://127.0.0.1:1080")
+    p.add_argument("--symbols", nargs="*", help="Specific symbols to fetch (space-separated).")
+    p.add_argument("--num-tickers", type=int, default=50, help="Top-N alts by quote volume (when --symbols is omitted)")
+    p.add_argument("--out", default="tickers.json", help="Output JSON file")
+    args = p.parse_args()
 
-# Retrieves ticker information.
-resp = requests.get('https://fapi.binance.com/fapi/v1/ticker/24hr')
-if resp.status_code != 200:
-    sys.exit(1)
+    try:
+        info = fetch_binance_futures_info(args.symbols, proxy=args.proxy)
+    except Exception as e:
+        print(f"[ERROR] {e}", file=sys.stderr)
+        sys.exit(1)
 
-tickers = resp.json()
+    if not args.symbols:
+        # Filter to top-N alts by quote volume
+        alts = {s: d for s, d in info.items() if not s.startswith("BTCUSD") and not s.startswith("ETHUSD")}
+        info = dict(sorted(alts.items(), key=lambda kv: float(kv[1]["quote_volume"]), reverse=True)[: args.num_tickers])
 
-resp = requests.get('https://fapi.binance.com/fapi/v1/exchangeInfo')
-if resp.status_code != 200:
-    sys.exit(1)
+    pprint.pprint(info, compact=True)
+    with open(args.out, "w") as f:
+        json.dump(info, f)
 
-exch_info = resp.json()
-
-# Reorganizes the ticker information to include what we need, such as tick size, lot size, daily volume, and
-# average price.
-ticker_info = {}
-
-for ticker in tickers:
-    symbol = ticker['symbol']
-    ticker_info[symbol] = info = {}
-    info['weighted_avg_price'] = ticker['weightedAvgPrice']
-    info['quote_volume'] = ticker['quoteVolume']
-
-for ticker in exch_info['symbols']:
-    symbol = ticker['symbol']
-    info = ticker_info.get(symbol)
-    if info is None:
-        continue
-
-    info['onboard_date'] = datetime.fromtimestamp(ticker['onboardDate'] / 1000).strftime('%Y%m%d')
-    for item in ticker['filters']:
-        if item['filterType'] == 'PRICE_FILTER':
-            info['tick_size'] = item['tickSize']
-        if item['filterType'] == 'LOT_SIZE':
-            info['lot_size'] = item['stepSize']
-            info['min_qty'] = item['minQty']
-        if item['filterType'] == 'MARKET_LOT_SIZE':
-            if info['lot_size'] != item['stepSize'] or info['min_qty'] != item['minQty']:
-                raise ValueError('MARKET_LOT_SIZE != LOT_SIZE')
-
-# Chooses only altcoins and choose the given number of top pairs based on daily trading volume. To avoid selecting pairs
-# with a spike in volume, it is recommended to calculate and use the average daily volume; you may select your own
-# trading universe pairs here.
-num_tickers = 50
-
-alts_tickers = {
-    symbol: info for symbol, info in ticker_info.items()
-    if not symbol.startswith('BTCUSD') and not symbol.startswith('ETHUSD')
-}
-alts_tickers = dict(sorted(alts_tickers.items(), key=lambda item: float(item[1]['quote_volume']), reverse=True))
-alts_tickers = dict(list(alts_tickers.items())[:num_tickers])
-
-pprint.pprint(alts_tickers, compact=True)
-
-with open('tickers.json', 'w') as f:
-    json.dump(alts_tickers, f)
+if __name__ == "__main__":
+    main()
