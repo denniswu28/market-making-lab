@@ -88,13 +88,13 @@ build:
 
 # -------- Pipeline steps ------------------------------------------------------
 convert:
-	$(CONDA_RUN) $(PY) $(PY_CONVERT) -c $(CONVERT_CFG)
+	$(CONDA_RUN) $(PY) $(PY_CONVERT) -c $(CONVERT_CFG) --strict
 
 latency:
 	$(CONDA_RUN) $(PY) $(PY_LATENCY) -c $(LATENCY_CFG)
 
 convert-latency:
-	$(CONDA_RUN) $(PY) $(PY_CONVERT_LATENCY) -c $(CONVERT_LATENCY_CFG)	
+	$(CONDA_RUN) $(PY) $(PY_CONVERT_LATENCY) -c $(CONVERT_LATENCY_CFG)	--strict
 
 backtest: $(BACKTEST_BIN)
 	$(CONDA_RUN) $(PY) $(PY_BACKTEST) -c $(BACKTEST_CFG)

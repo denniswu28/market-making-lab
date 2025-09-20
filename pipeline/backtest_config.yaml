@@ -4,8 +4,8 @@ exchange: "binance-futures"
 symbols: ["SOLUSDT"]
 
 # Date range (inclusive)
-date_from: 20240501
-date_to:   20240531
+date_from: 20250201
+date_to:   20250211
 
 # Optional SOD snapshot (per symbol you can leave blank)
 initial_snapshot: null   # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
@@ -18,7 +18,7 @@ num_proc: 4
 
 # Fees / Queue model
 fees:
-  maker: -0.00005
+  maker: -0.0000
   taker:  0.0007
 queue_power: 3.0
 

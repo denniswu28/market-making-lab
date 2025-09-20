@@ -21,7 +21,7 @@ TRADES_DTYPES = {
     "symbol": pl.String,
     "timestamp": pl.Int64,
     "local_timestamp": pl.Int64,
-    "id": pl.String,       
+    "id": pl.String,
     "side": pl.String,
     "price": pl.Float64,
     "amount": pl.Float64,
@@ -68,7 +68,6 @@ QUOTES_COLS = [
 ]
 
 def _cast_then_select(df: pl.DataFrame, order: list[str], dtypes: dict[str, pl.PolarsDataType]) -> pl.DataFrame:
-    # cast with strict=False so ints->strings, 0/1->bool, etc. won’t error
     casts = []
     for c in order:
         if c not in df.columns:
@@ -82,15 +81,13 @@ def _norm_date(d: str) -> Tuple[str, str]:
         yyyy, mm, dd = s.split("-")
         return f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}", f"{yyyy}{mm.zfill(2)}{dd.zfill(2)}"
     else:
-        s = s.strip()
+        s = d.strip()
         if len(s) != 8 or not s.isdigit():
             raise ValueError(f"Bad date: {d}")
         return f"{s[0:4]}-{s[4:6]}-{s[6:8]}", s
 
-
 def _ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
-
 
 def _pick_snapshot_mode(global_mode: str, this_date_ymd: str, sod_ymd: Optional[str]) -> str:
     if global_mode != "auto":
@@ -98,7 +95,6 @@ def _pick_snapshot_mode(global_mode: str, this_date_ymd: str, sod_ymd: Optional[
     if sod_ymd and (this_date_ymd == sod_ymd):
         return "process"
     return "ignore_sod"
-
 
 @dataclass
 class Job:
@@ -120,15 +116,13 @@ class Job:
     output_format: str  # 'npz' or 'npy'
     delete_inputs_after: bool
 
-
 def _build_src_paths(j: Job) -> Dict[str, str]:
     base = os.path.join(j.data_root, j.exchange)
     return {
         "trades": os.path.join(base, "trades", j.date_dash, f"{j.symbol}.parquet"),
-        "depth": os.path.join(base, "incremental_book_L2", j.date_dash, f"{j.symbol}.parquet"),
+        "depth":  os.path.join(base, "incremental_book_L2", j.date_dash, f"{j.symbol}.parquet"),
         "quotes": os.path.join(base, "quotes", j.date_dash, f"{j.symbol}.parquet"),
     }
-
 
 def _output_path(j: Job) -> str:
     out_dir = os.path.join(j.output_root, j.exchange, j.symbol)
@@ -136,16 +130,12 @@ def _output_path(j: Job) -> str:
     ext = ".npz" if j.output_format == "npz" else ".npy"
     return os.path.join(out_dir, f"{j.symbol}_{j.date_ymd}{ext}")
 
-
 def _tmp_path(j: Job, kind: str) -> str:
-    # unique per (exchange, symbol, date, kind)
     d = os.path.join(j.tmp_root, j.exchange, j.symbol, j.date_ymd)
     _ensure_dir(d)
     return os.path.join(d, f"{kind}.parquet")
 
-
 def _standardize_quotes_columns(df: pl.DataFrame) -> pl.DataFrame:
-    # Tardis sometimes uses 'ask_size'/'bid_size'
     rename_map = {}
     if "ask_size" in df.columns and "ask_amount" not in df.columns:
         rename_map["ask_size"] = "ask_amount"
@@ -155,27 +145,20 @@ def _standardize_quotes_columns(df: pl.DataFrame) -> pl.DataFrame:
         df = df.rename(rename_map)
     return df
 
-
 def _coerce_and_select(df: pl.DataFrame, cols: List[str]) -> pl.DataFrame:
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise KeyError(f"Missing required columns: {missing}")
-    # Ensure order and dtypes that play nice with hftbacktest's Polars -> NumPy conversions
-    # (We avoid over-casting; Polars will cast as needed inside tardis.convert.)
     return df.select(cols)
-
 
 def _prepare_parquet(src_path: str, dst_path: str, kind: str, exchange: str, symbol: str) -> str:
     df = pl.read_parquet(src_path)
-
-    # Ensure dummy ‘exchange’/‘symbol’
     if "exchange" not in df.columns:
         df = df.with_columns(pl.lit(exchange).alias("exchange"))
     if "symbol" not in df.columns:
         df = df.with_columns(pl.lit(symbol).alias("symbol"))
 
     if kind == "trades":
-        # Some drops have qty instead of amount
         if "amount" not in df.columns and "qty" in df.columns:
             df = df.rename({"qty": "amount"})
         df = _cast_then_select(df, TRADES_COLS, TRADES_DTYPES)
@@ -184,18 +167,51 @@ def _prepare_parquet(src_path: str, dst_path: str, kind: str, exchange: str, sym
         df = _cast_then_select(df, DEPTH_COLS, DEPTH_DTYPES)
 
     elif kind == "quotes":
-        # Normalize ask_size/bid_size -> ask_amount/bid_amount
         if "ask_size" in df.columns and "ask_amount" not in df.columns:
             df = df.rename({"ask_size": "ask_amount"})
         if "bid_size" in df.columns and "bid_amount" not in df.columns:
             df = df.rename({"bid_size": "bid_amount"})
         df = _cast_then_select(df, QUOTES_COLS, QUOTES_DTYPES)
-
     else:
         raise ValueError(kind)
 
     df.write_parquet(dst_path)
     return dst_path
+
+# ---------------------------- PRE-FLIGHT ----------------------------
+
+def _preflight_jobs(jobs: List[Job]) -> Tuple[List[Job], List[Tuple[str, str, List[Tuple[str, str]]]], List[Tuple[str, str, str]]]:
+    """
+    Returns:
+      ok_jobs: jobs with all required inputs present and (if use_quotes) tick/lot provided.
+      missing_files: list of (symbol, date_ymd, [(kind, path), ...missing])
+      missing_meta: list of (symbol, date_ymd, reason) when tick/lot missing for fuse.
+    """
+    ok_jobs: List[Job] = []
+    missing_files: List[Tuple[str, str, List[Tuple[str, str]]]] = []
+    missing_meta: List[Tuple[str, str, str]] = []
+
+    for j in jobs:
+        paths = _build_src_paths(j)
+        needs = ["trades", "depth"] + (["quotes"] if j.use_quotes else [])
+        miss: List[Tuple[str, str]] = []
+        for k in needs:
+            p = paths[k]
+            if not os.path.exists(p):
+                miss.append((k, p))
+        if miss:
+            missing_files.append((j.symbol, j.date_ymd, miss))
+            continue
+
+        if j.use_quotes and (j.tick_size is None or j.lot_size is None):
+            missing_meta.append((j.symbol, j.date_ymd, "tick_size and/or lot_size missing for convert_fuse"))
+            continue
+
+        ok_jobs.append(j)
+
+    return ok_jobs, missing_files, missing_meta
+
+# ---------------------------- WORKER ----------------------------
 
 def _convert_one(j: Job) -> Tuple[str, str, Optional[str], List[str]]:
     logs: List[str] = []
@@ -207,7 +223,6 @@ def _convert_one(j: Job) -> Tuple[str, str, Optional[str], List[str]]:
         tmp_depth  = _tmp_path(j, "depth")
         tmp_quotes = _tmp_path(j, "quotes")
 
-        # Always prepare the standardized inputs with dummy columns
         trades_file = _prepare_parquet(src["trades"], tmp_trades, "trades", j.exchange, j.symbol)
         depth_file  = _prepare_parquet(src["depth"],  tmp_depth,  "depth",  j.exchange, j.symbol)
         logs.append(f"[READ] trades={trades_file}")
@@ -288,11 +303,13 @@ def _convert_one(j: Job) -> Tuple[str, str, Optional[str], List[str]]:
         logs.append(f"[EXCEPTION] {e}")
         return (j.symbol, j.date_ymd, f"{e}\n{traceback.format_exc(limit=3)}", logs)
 
+# ---------------------------- MAIN ----------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="Convert Tardis parquet to hftbacktest npz/npy (adds dummy exchange/symbol).")
     parser.add_argument("-c", "--config", required=True, help="Path to YAML config")
     parser.add_argument("--proxy", default="socks5h://127.0.0.1:1080", help="Proxy for Binance REST, e.g. socks5h://127.0.0.1:1080")
+    parser.add_argument("--strict", action="store_true", help="Fail the entire run if any required input is missing")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -314,19 +331,21 @@ def main():
     tick_size_map: Dict[str, float] = cfg.get("tick_size", {}) or {}
     lot_size_map: Dict[str, float] = cfg.get("lot_size", {}) or {}
 
-    missing = [s for s in symbols if (s not in tick_size_map or s not in lot_size_map)]
-    if use_quotes and missing:
-        fetched = fetch_binance_futures_info(missing, proxy=args.proxy)
-        for s in missing:
-            ent = fetched.get(s)
-            if ent:
-                # only fill missing
-                if s not in tick_size_map and "tick_size" in ent:
-                    tick_size_map[s] = float(ent["tick_size"])
-                if s not in lot_size_map and "lot_size" in ent:
-                    lot_size_map[s] = float(ent["lot_size"])
-            else:
-                print(f"[WARN] No ticker info for {s}; convert_fuse may fail without tick/lot.")
+    missing_syms = [s for s in symbols if (s not in tick_size_map or s not in lot_size_map)]
+    if use_quotes and missing_syms:
+        try:
+            fetched = fetch_binance_futures_info(missing_syms, proxy=args.proxy)
+            for s in missing_syms:
+                ent = fetched.get(s)
+                if ent:
+                    if s not in tick_size_map and "tick_size" in ent:
+                        tick_size_map[s] = float(ent["tick_size"])
+                    if s not in lot_size_map and "lot_size" in ent:
+                        lot_size_map[s] = float(ent["lot_size"])
+                else:
+                    print(f"[WARN] No ticker info for {s}; convert_fuse may fail without tick/lot.")
+        except Exception as e:
+            print(f"[WARN] ticker fetch failed: {e}")
 
     num_proc: int = int(cfg.get("num_proc", max(1, mp.cpu_count() // 2)))
     buffer_size: int = int(cfg.get("buffer_size", 100_000_000))
@@ -343,7 +362,7 @@ def main():
     if sod_date:
         sod_dash, sod_ymd = _norm_date(sod_date)
 
-    # Jobs
+    # Build jobs
     jobs: List[Job] = []
     for sym in symbols:
         for d_dash, d_ymd in norm_dates:
@@ -375,19 +394,42 @@ def main():
     print(f"[convert] num_proc={num_proc} buffer_size={buffer_size} ss_buffer_size={ss_buffer_size} base_latency={base_latency}")
     print(f"[convert] output_format={output_format} output_root={output_root} tmp_root={tmp_root}")
 
+    # -------- PRE-FLIGHT: verify inputs --------
+    jobs_ok, miss_files, miss_meta = _preflight_jobs(jobs)
+
+    if miss_files:
+        print("\n[preflight] Missing required files:")
+        for sym, d, items in miss_files:
+            for kind, path in items:
+                print(f"  - {sym} {d}: {kind} -> {path} [NOT FOUND]")
+    if miss_meta:
+        print("\n[preflight] Missing metadata for quotes fuse:")
+        for sym, d, reason in miss_meta:
+            print(f"  - {sym} {d}: {reason}")
+
+    if (miss_files or miss_meta) and args.strict:
+        print("\n[preflight] Aborting due to missing inputs (strict mode).")
+        sys.exit(2)
+
+    if not jobs_ok:
+        print("\n[preflight] No valid jobs to run after validation. Exiting.")
+        return
+
+    print(f"\n[preflight] OK jobs: {len(jobs_ok)} / {len(jobs)}  "
+          f"(missing files: {len(miss_files)}, missing meta: {len(miss_meta)})\n")
+
+    # -------- CONVERT --------
     ctx = mp.get_context("spawn") if sys.platform.startswith("win") else mp.get_context("fork")
-    total = len(jobs)
+    total = len(jobs_ok)
     with ctx.Pool(processes=num_proc) as pool:
-        it = pool.imap_unordered(_convert_one, jobs, chunksize=1)
+        it = pool.imap_unordered(_convert_one, jobs_ok, chunksize=1)
         for sym, d, err, logs in tqdm(it, total=total, desc="Converting", unit="combo"):
-            # print the worker logs cleanly without breaking the bar
             for line in logs:
                 tqdm.write(line)
             if err is None:
                 tqdm.write(f"[OK] {sym} {d}")
             else:
                 tqdm.write(f"[FAIL] {sym} {d} -> {err}")
-
 
 if __name__ == "__main__":
     main()

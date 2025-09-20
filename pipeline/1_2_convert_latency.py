@@ -19,6 +19,9 @@ from numba import njit
 from hftbacktest.data.utils import tardis          # convert / convert_fuse
 from hftbacktest import EXCH_EVENT, LOCAL_EVENT    # bitmasks for filter
 
+# ticker fetch (SOCKS5 / HTTP proxy supported)
+from util.ticker_helper import fetch_binance_futures_info
+
 # -------------------------------- schemas for converter --------------------------------
 
 TRADES_DTYPES = {
@@ -129,7 +132,6 @@ def _build_src_paths(conv: ConvertCfg, symbol: str, date_dash: str) -> Dict[str,
     }
 
 def _feed_out_path(conv: ConvertCfg, symbol: str, date_ymd: str) -> str:
-    # /feeds_root/{exchange}/{symbol}/{symbol}_{YYYYMMDD}.npz
     out_dir = os.path.join(conv.feeds_root, conv.exchange, symbol)
     _ensure_dir(out_dir)
     ext = ".npz"  # pipeline expects npz with key 'data'
@@ -173,6 +175,41 @@ def _prepare_parquet(src_path: str, dst_path: str, kind: str, exchange: str, sym
     df.write_parquet(dst_path)
     return dst_path
 
+# -------------------------------- PRE-FLIGHT (new) --------------------------------
+def _preflight_jobs(jobs: List[Job]) -> Tuple[List[Job], List[Tuple[str, str, List[Tuple[str, str]]]], List[Tuple[str, str, str]]]:
+    """
+    Returns:
+      ok_jobs: jobs with all required inputs present and (if use_quotes) tick/lot provided.
+      missing_files: list of (symbol, date_ymd, [(kind, path), ...missing])
+      missing_meta: list of (symbol, date_ymd, reason) when tick/lot missing for fuse.
+    """
+    ok_jobs: List[Job] = []
+    missing_files: List[Tuple[str, str, List[Tuple[str, str]]]] = []
+    missing_meta: List[Tuple[str, str, str]] = []
+
+    for j in jobs:
+        paths = _build_src_paths(j.conv, j.symbol, j.date_dash)
+        needs = ["trades", "depth"] + (["quotes"] if j.conv.use_quotes else [])
+        miss: List[Tuple[str, str]] = []
+        for k in needs:
+            p = paths[k]
+            if not os.path.exists(p):
+                miss.append((k, p))
+        if miss:
+            missing_files.append((j.symbol, j.date_ymd, miss))
+            continue
+
+        if j.conv.use_quotes:
+            ts = j.conv.tick_size_map.get(j.symbol)
+            ls = j.conv.lot_size_map.get(j.symbol)
+            if ts is None or ls is None:
+                missing_meta.append((j.symbol, j.date_ymd, "tick_size and/or lot_size missing for convert_fuse"))
+                continue
+
+        ok_jobs.append(j)
+
+    return ok_jobs, missing_files, missing_meta
+
 # -------------------------------- latency kernel --------------------------------
 
 @njit
@@ -208,12 +245,12 @@ def _run_one(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
             logs.append(f"[SKIP-CONVERT] exists: {feed_out}")
         else:
             src = _build_src_paths(job.conv, sym, job.date_dash)
+            # preflight already checked, but keep a safety net:
             for need, path in src.items():
                 if need in ("trades","depth") and not os.path.exists(path):
                     msg = f"Missing input {need}: {path}"
                     logs.append(f"[MISS] {msg}")
                     return (sym, d, msg, logs)
-
             tmp_trades = _tmp_path(job.conv, sym, d, "trades")
             tmp_depth  = _tmp_path(job.conv, sym, d, "depth")
             trades_file = _prepare_parquet(src["trades"], tmp_trades, "trades", job.conv.exchange, sym)
@@ -318,6 +355,10 @@ def _run_one(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
 def main():
     parser = argparse.ArgumentParser(description="Convert Tardis parquet to feeds and derive latency — one pipeline.")
     parser.add_argument("-c", "--config", required=True, help="Path to YAML config")
+    parser.add_argument("--proxy", default="socks5h://127.0.0.1:1080",
+                        help="Proxy for Binance REST, e.g. socks5h://127.0.0.1:1080")
+    parser.add_argument("--strict", action="store_true",
+                        help="Abort the entire run if any required input or metadata is missing")
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
@@ -339,7 +380,25 @@ def main():
 
     use_quotes: bool = bool(cfg.get("use_quotes", False))
     tick_size_map: Dict[str, float] = cfg.get("tick_size", {}) or {}
-    lot_size_map:  Dict[str, float] = cfg.get("lot_size", {})  or {}
+    lot_size_map: Dict[str, float]  = cfg.get("lot_size", {})  or {}
+
+    # Try to fill missing tick/lot (only needed if use_quotes)
+    if use_quotes:
+        missing_syms = [s for s in symbols if (s not in tick_size_map or s not in lot_size_map)]
+        if missing_syms:
+            try:
+                fetched = fetch_binance_futures_info(missing_syms, proxy=args.proxy)
+                for s in missing_syms:
+                    ent = fetched.get(s)
+                    if ent:
+                        if s not in tick_size_map and "tick_size" in ent:
+                            tick_size_map[s] = float(ent["tick_size"])
+                        if s not in lot_size_map and "lot_size" in ent:
+                            lot_size_map[s] = float(ent["lot_size"])
+                    else:
+                        print(f"[WARN] No ticker info for {s}; convert_fuse may fail without tick/lot.")
+            except Exception as e:
+                print(f"[WARN] ticker fetch failed: {e}")
 
     snapshot_mode_global: str = cfg.get("snapshot_mode", "auto")
     sod_date: Optional[str] = cfg.get("sod_date")
@@ -403,11 +462,36 @@ def main():
     print(f"[pipeline] num_proc={num_proc} buffer_size={buffer_size} ss_buffer_size={ss_buffer_size} base_latency={base_latency}")
     print(f"[pipeline] quotes={use_quotes} bucket_every={bucket_every} mul_entry={mul_entry} mul_resp={mul_resp}")
 
+    # -------- PRE-FLIGHT: verify inputs & metadata --------
+    jobs_ok, miss_files, miss_meta = _preflight_jobs(jobs)
+
+    if miss_files:
+        print("\n[preflight] Missing required files:")
+        for sym, d, items in miss_files:
+            for kind, path in items:
+                print(f"  - {sym} {d}: {kind} -> {path} [NOT FOUND]")
+
+    if miss_meta:
+        print("\n[preflight] Missing metadata for quotes fuse:")
+        for sym, d, reason in miss_meta:
+            print(f"  - {sym} {d}: {reason}")
+
+    if (miss_files or miss_meta) and args.strict:
+        print("\n[preflight] Aborting due to missing inputs (strict mode).")
+        sys.exit(2)
+
+    if not jobs_ok:
+        print("\n[preflight] No valid jobs to run after validation. Exiting.")
+        return
+
+    print(f"\n[preflight] OK jobs: {len(jobs_ok)} / {len(jobs)}  "
+          f"(missing files: {len(miss_files)}, missing meta: {len(miss_meta)})\n")
+
     # Run parallel; each job does convert then latency
     ctx = mp.get_context("spawn") if sys.platform.startswith("win") else mp.get_context("fork")
-    total = len(jobs)
+    total = len(jobs_ok)
     with ctx.Pool(processes=num_proc) as pool:
-        it = pool.imap_unordered(_run_one, jobs, chunksize=1)
+        it = pool.imap_unordered(_run_one, jobs_ok, chunksize=1)
         for sym, d, err, logs in tqdm(it, total=total, desc="Convert → Latency", unit="combo"):
             for line in logs:
                 tqdm.write(line)
