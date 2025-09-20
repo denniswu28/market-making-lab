@@ -11,8 +11,8 @@ symbols: ["USDCUSDT", "SOLUSDT"]
 
 # Dates: either explicit list OR range (inclusive)
 # dates: ["2024-05-01", "2024-05-02"]
-date_from: "2025-08-01"
-date_to:   "2025-08-05"
+date_from: "2025-06-01"
+date_to:   "2025-09-05"
 
 # ===== Convert settings =====
 snapshot_mode: "auto"     # auto | process | ignore_sod | ignore
@@ -30,7 +30,6 @@ lot_size:
   ETHUSDT: 0.001
   SOLUSDT: 0.01
   USDCUSDT: 1.0
-
 
 num_proc: 4
 buffer_size: 200000000
