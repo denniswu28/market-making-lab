@@ -50,7 +50,9 @@ def fetch_binance_futures_info(
         sym = s["symbol"]
         if sym not in info:
             info[sym] = {}
-        info[sym]["onboard_date"] = datetime.fromtimestamp(s["onboardDate"] / 1000).strftime("%Y%m%d")
+        info[sym]["onboard_date"] = datetime.fromtimestamp(
+            s["onboardDate"] / 1000
+        ).strftime("%Y%m%d")
         for f in s["filters"]:
             ft = f["filterType"]
             if ft == "PRICE_FILTER":
@@ -59,9 +61,9 @@ def fetch_binance_futures_info(
                 info[sym]["lot_size"] = f["stepSize"]
                 info[sym]["min_qty"] = f["minQty"]
             elif ft == "MARKET_LOT_SIZE":
-                if ("lot_size" in info[sym] and info[sym]["lot_size"] != f["stepSize"]) or (
-                    "min_qty" in info[sym] and info[sym]["min_qty"] != f["minQty"]
-                ):
+                if (
+                    "lot_size" in info[sym] and info[sym]["lot_size"] != f["stepSize"]
+                ) or ("min_qty" in info[sym] and info[sym]["min_qty"] != f["minQty"]):
                     raise ValueError(f"{sym}: MARKET_LOT_SIZE != LOT_SIZE")
 
     if symbols is not None:

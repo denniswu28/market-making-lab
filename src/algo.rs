@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use hftbacktest::prelude::*;
 use hftbacktest::depth::{INVALID_MIN, INVALID_MAX};
-
+use tracing::{trace, debug, info, warn, error};
 /// ---------------------------
 /// Rolling utilities
 /// ---------------------------
@@ -269,8 +269,24 @@ where
         .max(min_grid_step);
     bid_price = (bid_price / grid_interval).floor() * grid_interval;
     ask_price = (ask_price / grid_interval).ceil() * grid_interval;
+    let lot = hbt.depth(0).lot_size() as f64;
+    let tick_order_qty = ((order_qty / lot).round_ties_even()) * lot;
+
+    debug!(
+        mid = forecast_mid_price,
+        rel_half = relative_half_spread,
+        rel_grid = relative_grid_interval,
+        min_grid_step,
+        skew,
+        order_qty = tick_order_qty,
+        max_position,
+        grid_num,
+        "grid update inputs"
+    );
+
 
     hbt.clear_inactive_orders(Some(0));
+    
     // BUY side
     {
         let orders = hbt.orders(0);
@@ -291,10 +307,14 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
-        for id in cancels { let _ = hbt.cancel(0, id, false); }
+        for id in cancels { 
+            debug!(side="buy", order_id=id, "cancel BUY");
+            let _ = hbt.cancel(0, id, false); 
+        }
         for (id, px) in posts {
+            debug!(side="buy", order_id=id, price=px, qty=tick_order_qty, "post BUY");
             let _ = hftbacktest::prelude::Bot::submit_buy_order(
-                hbt, 0, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false
+                hbt, 0, id, px, tick_order_qty, TimeInForce::GTX, OrdType::Limit, false
             );
         }
     }
@@ -318,10 +338,14 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
-        for id in cancels { let _ = hbt.cancel(0, id, false); }
+        for id in cancels {
+            debug!(side="sell", order_id=id, "cancel SELL");
+            let _ = hbt.cancel(0, id, false); 
+        }
         for (id, px) in posts {
+            debug!(side="sell", order_id=id, price=px, qty=tick_order_qty, "post SELL");
             let _ = hftbacktest::prelude::Bot::submit_sell_order(
-                hbt, 0, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false
+                hbt, 0, id, px, tick_order_qty, TimeInForce::GTX, OrdType::Limit, false
             );
         }
     }
@@ -335,7 +359,7 @@ fn run_loop<I, R, MD, F>(
     elapse_ns: i64,
     record_every: usize,
     mut fair_price_fn: F,
-    quote_args: (&f64, &f64, &usize, &f64, &f64, &f64, &usize),
+    quote_args: (&f64, &f64, &usize, &f64, &f64, &f64, &f64)
 ) -> Result<(), i64>
 where
     MD: MarketDepth,
@@ -345,10 +369,11 @@ where
     <R as Recorder>::Error: std::fmt::Debug,
     F: FnMut(&I) -> f64,
 {
-    let (rel_half, rel_grid, grid_num, min_step, skew, order_qty, max_pos) = quote_args;
+    let (rel_half, rel_grid, grid_num, min_step, skew, order_qty, max_pos_qty) = quote_args;
     let mut k = 0usize;
     while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
         k += 1;
+        trace!(k=k,ts=hbt.current_timestamp(),"loop");
         if k % record_every == 0 { recorder.record(hbt).unwrap(); }
         let forecast_mid = fair_price_fn(hbt);
         update_grid::<I, MD>(
@@ -359,7 +384,7 @@ where
             *min_step,
             *skew,
             *order_qty,
-            (*max_pos as f64) * *order_qty, // treat as number of lots
+           *max_pos_qty,
             *grid_num,
         )?;
     }
@@ -379,7 +404,7 @@ pub fn grid_obi_static_alpha<MD, I, R>(
     min_grid_step: f64,
     skew: f64,
     order_qty: f64,
-    max_position_lots: f64,
+    max_position_qty: f64,
     // --- alpha knobs ---
     look_depth_pct: f64,        // e.g. 0.025 => +/-2.5%
     normalize: bool,            // true => (B-A)/(B+A), false => (B-A)
@@ -405,9 +430,12 @@ where
             let d = bot.depth(0);
             let bb = d.best_bid();
             let ba = d.best_ask();
-            if bb.is_nan() || ba.is_nan() { return f64::NAN; }
+            if bb.is_nan() || ba.is_nan() { 
+                trace!("no BBO yet; skipping");
+                return f64::NAN; 
+            }
             let mid = 0.5 * (bb + ba) as f64;
-
+            trace!(best_bid=bb, best_ask=ba, mid, "BBO");
             // compute static OBI within +/- look_depth_pct of mid
             let ts = d.tick_size() as f64;
             let best_bid_tick = d.best_bid_tick();
@@ -435,7 +463,7 @@ where
             &min_grid_step,
             &skew,
             &order_qty,
-            &(max_position_lots as usize),
+            &max_position_qty,
         ),
     )
 }
@@ -454,7 +482,7 @@ pub fn grid_vamp_fair<MD, I, R>(
     min_grid_step: f64,
     skew: f64,
     order_qty: f64,
-    max_position_lots: f64,
+    max_position_qty: f64,
     depth_pct: f64,             // e.g. 0.01 => 1% bands
     price_transform: Transform, // apply to the VAMP price series (SMA/EMA/ZScore/None)
     z_as_alpha_scale: f64,      // when Transform::ZScore, interpret z as alpha and do mid + k*z
@@ -514,7 +542,7 @@ where
             &min_grid_step,
             &skew,
             &order_qty,
-            &(max_position_lots as usize),
+            &max_position_qty,
         ),
     )
 }
@@ -533,7 +561,7 @@ pub fn grid_weighted_depth_fair<MD, I, R>(
     min_grid_step: f64,
     skew: f64,
     order_qty: f64,
-    max_position_lots: f64,
+    max_position_qty: f64,
     target_qty_per_side: f64,   // e.g. 500 contracts on each side
     price_transform: Transform, // SMA/EMA/ZScore/None on the price or z→alpha
     z_as_alpha_scale: f64,
@@ -581,7 +609,7 @@ where
             &min_grid_step,
             &skew,
             &order_qty,
-            &(max_position_lots as usize),
+            &max_position_qty,
         ),
     )
 }
@@ -600,7 +628,7 @@ pub fn grid_vamp_effective_fair<MD, I, R>(
     min_grid_step: f64,
     skew: f64,
     order_qty: f64,
-    max_position_lots: f64,
+    max_position_qty: f64,
     depth_pct: f64,
     price_transform: Transform,
     z_as_alpha_scale: f64,
@@ -657,7 +685,7 @@ where
             &min_grid_step,
             &skew,
             &order_qty,
-            &(max_position_lots as usize),
+            &max_position_qty,
         ),
     )
 }
@@ -700,7 +728,7 @@ where
             &min_grid_step,
             &skew,
             &order_qty,
-            &(max_position as usize),
+            &max_position,
         ),
     )
 }

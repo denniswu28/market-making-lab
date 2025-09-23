@@ -9,22 +9,22 @@ keep_temps: false
 
 # Exchange & instruments
 exchange: "binance-futures"           # or "okex-swap"
-symbols: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+symbols: ["SOLUSDT"]
 
 # Dates to convert (either format is fine)
-dates: ["2024-05-01", "2024-05-02"]
+dates: ["2025-01-29", "2025-01-30", "2025-01-31", "2025-02-01", "2025-02-02"]
 
 # Snapshot handling
 #   auto: process SOD on sod_date, ignore_sod otherwise
 #   process | ignore_sod | ignore to force same mode for all days
-snapshot_mode: "auto"
-sod_date: "2024-05-01"                # first backtest date
+snapshot_mode: "process"
+sod_date: "2025-01-29"                # first backtest date
 
 # Use quotes/BBO ("book_ticker") to fuse with depth+trades
 use_quotes: false
 
 # hftbacktest conversion knobs
-num_proc: 2
+num_proc: 5
 buffer_size: 200000000
 ss_buffer_size: 2000000
 base_latency: 0.0

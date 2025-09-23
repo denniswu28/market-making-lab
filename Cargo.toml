@@ -14,7 +14,8 @@ path = "src/main.rs"
 [dependencies]
 clap = {version = "4.5.47", features = ["derive"] }
 hftbacktest = { path = "../hftbacktest/hftbacktest" }
-tracing-subscriber = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "gridtrading_backtest"

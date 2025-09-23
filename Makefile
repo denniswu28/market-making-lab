@@ -1,116 +1,126 @@
-# -------- Settings (override with `make VAR=...`) -----------------------------
+# ------------------------------------------------------------
+# Makefile for statmm (matches your current file names)
+# ------------------------------------------------------------
 
-# Conda env used for the Python steps
-CONDA_ENV ?= hftbacktest
-CONDA     ?= conda
-CONDA_RUN ?= $(CONDA) run -n $(CONDA_ENV)
+SHELL := /bin/bash
 
-# Paths to configs (default to ./pipeline/*.yaml)
-CFG_DIR           ?= pipeline
-CONVERT_CFG       ?= $(CFG_DIR)/convert_config.yaml
-LATENCY_CFG       ?= $(CFG_DIR)/latency_config.yaml
-CONVERT_LATENCY_CFG       ?= $(CFG_DIR)/convert_latency_config.yaml
-BACKTEST_CFG      ?= $(CFG_DIR)/backtest_config.yaml
+# -------- Settings (override with `make VAR=...`) -----------
+CONDA       ?= conda
+CONDA_ENV   ?= hftbacktest
+ACTIVATE    = eval "$$($(CONDA) shell.bash hook)"; $(CONDA) activate $(CONDA_ENV);
 
-# Python entry points
-PY_CONVERT  ?= pipeline/1_convert.py
-PY_LATENCY  ?= pipeline/2_latency.py
-PY_CONVERT_LATENCY  ?= pipeline/1_2_convert_latency.py
-PY_BACKTEST ?= pipeline/3_backtest.py
+# Configs
+CFG_DIR                ?= pipeline
+CONVERT_CFG            ?= $(CFG_DIR)/convert_config.yaml
+LATENCY_CFG            ?= $(CFG_DIR)/latency_config.yaml
+CONVERT_LATENCY_CFG    ?= $(CFG_DIR)/convert_latency_config.yaml
+BACKTEST_CFG           ?= $(CFG_DIR)/backtest_config.yaml
+GRIDSEARCH_CFG         ?= $(CFG_DIR)/gridsearch_config.yaml
+SNAPSHOT_CFG           ?= $(CFG_DIR)/snapshot_config.yaml
 
-# Rust binary name (you exposed it as [[bin]] in Cargo.toml)
-BACKTEST_BIN ?= target/release/gridtrading_backtest_args
+# Python entry points (match your files)
+PY_TICKER          ?= pipeline/0_ticker.py
+PY_CONVERT         ?= pipeline/1_convert.py
+PY_LATENCY         ?= pipeline/2_latency.py
+PY_SNAPSHOT        ?= pipeline/3_snapshot.py
+PY_BACKTEST        ?= pipeline/4_backtest.py
+PY_GRIDSEARCH      ?= pipeline/5_gridsearch.py
+PY_STATS           ?= pipeline/6_stats.py
+PY_CONVERT_LATENCY ?= pipeline/1_2_convert_latency.py
 
-# Optional output dir for reports (only used by `clean-out`)
+# Rust
+CARGO ?= cargo
+BACKTEST_EXAMPLE ?= target/release/examples/gridtrading_backtest_args
+
+# Output dir
 OUT_DIR ?= out
 
-# Tools
-CARGO ?= cargo
-RUSTC ?= rustc
-PY    ?= python
+# -------- Phonies -------------------------------------------
+.PHONY: help fmt fmt-rs fmt-py fmt-check lint lint-rs lint-py \
+        check build build-backtest ticker convert latency convert-latency \
+        snapshot backtest gridsearch stats pipeline clean clean-out clean-all
 
-# -------- Phonies -------------------------------------------------------------
-.PHONY: help lint lint-rs lint-py fmt fmt-rs fmt-py fmt-check check build \
-        convert latency backtest pipeline clean clean-out clean-all
-
-# -------- Help ----------------------------------------------------------------
+# -------- Help ----------------------------------------------
 help:
 	@echo "Targets:"
-	@echo "  make fmt           - format Rust (cargo fmt) and Python (black/isort if installed)"
-	@echo "  make fmt-check     - check formatting without writing (rustfmt/black/isort --check)"
-	@echo "  make lint          - lint Rust (clippy) and Python (ruff/flake8 if installed)"
-	@echo "  make check         - cargo check (fast type-check)"
-	@echo "  make build         - cargo build --release (builds $(BACKTEST_BIN))"
-	@echo "  make convert       - python $(PY_CONVERT) -c $(CONVERT_CFG) in $(CONDA_ENV)"
-	@echo "  make latency       - python $(PY_LATENCY) -c $(LATENCY_CFG) in $(CONDA_ENV)"
-	@echo "  make backtest      - python $(PY_BACKTEST) -c $(BACKTEST_CFG) in $(CONDA_ENV)"
-	@echo "  make pipeline      - convert -> latency -> build -> backtest"
-	@echo "  make clean         - cargo clean"
-	@echo "  make clean-out     - rm -rf $(OUT_DIR) (if it exists)"
-	@echo "  make clean-all     - clean + clean-out"
-	@echo ""
-	@echo "Overrides (examples):"
-	@echo "  make pipeline CONDA_ENV=hftbt CFG_DIR=pipeline"
-	@echo "  make convert CONVERT_CFG=pipeline/convert_config.yaml"
-	@echo "  make backtest BACKTEST_CFG=pipeline/backtest_config.yaml"
+	@echo "  fmt / fmt-check  - format/check Rust & Python"
+	@echo "  lint             - clippy + ruff/flake8"
+	@echo "  check            - cargo check"
+	@echo "  build            - cargo build --release"
+	@echo "  build-backtest   - build example: $(BACKTEST_EXAMPLE)"
+	@echo "  ticker           - fetch Binance futures tickers.json"
+	@echo "  convert          - 1_convert.py -c $(CONVERT_CFG) (strict)"
+	@echo "  latency          - 2_latency.py -c $(LATENCY_CFG)"
+	@echo "  convert-latency  - 1_2_convert_latency.py -c $(CONVERT_LATENCY_CFG) (strict)"
+	@echo "  backtest         - 4_backtest.py -c $(BACKTEST_CFG)"
+	@echo "  gridsearch       - 5_gridsearch.py -c $(GRIDSEARCH_CFG)"
+	@echo "  snapshot         - 3_snapshot.py -c $(SNAPSHOT_CFG)"
+	@echo "  pipeline         - convert -> latency -> build-backtest -> backtest"
+	@echo "  clean / clean-out/ clean-all"
 
-# -------- Formatting ----------------------------------------------------------
+# -------- Formatting ----------------------------------------
 fmt: fmt-rs fmt-py
-
 fmt-rs:
 	$(CARGO) fmt --all
-
 fmt-py:
-	@command -v black >/dev/null 2>&1 && $(CONDA_RUN) black pipeline || echo "[skip] black not found"
-	@command -v isort >/dev/null 2>&1 && $(CONDA_RUN) isort pipeline || echo "[skip] isort not found"
-
+	@$(ACTIVATE) \
+	if command -v black >/dev/null 2>&1; then black pipeline; else echo "[skip] black not found"; fi; \
+	if command -v isort >/dev/null 2>&1; then isort pipeline; else echo "[skip] isort not found"; fi
 fmt-check:
 	$(CARGO) fmt --all -- --check
-	@command -v black >/dev/null 2>&1 && $(CONDA_RUN) black --check pipeline || echo "[skip] black --check not found"
-	@command -v isort >/dev/null 2>&1 && $(CONDA_RUN) isort --check-only pipeline || echo "[skip] isort --check not found"
+	@$(ACTIVATE) \
+	if command -v black >/dev/null 2>&1; then black --check pipeline; else echo "[skip] black --check not found"; fi; \
+	if command -v isort >/dev/null 2>&1; then isort --check-only pipeline; else echo "[skip] isort --check not found"; fi
 
-# -------- Linting -------------------------------------------------------------
+# -------- Linting -------------------------------------------
 lint: lint-rs lint-py
-
 lint-rs:
 	$(CARGO) clippy --all-targets --all-features -- -D warnings
-
 lint-py:
-	@command -v ruff >/dev/null 2>&1 && $(CONDA_RUN) ruff check pipeline || \
-	 (command -v flake8 >/dev/null 2>&1 && $(CONDA_RUN) flake8 pipeline || echo "[skip] ruff/flake8 not found")
+	@$(ACTIVATE) \
+	if command -v ruff >/dev/null 2>&1; then ruff check pipeline --fix; \
+	elif command -v flake8 >/dev/null 2>&1; then flake8 pipeline; \
+	else echo "[skip] ruff/flake8 not found"; fi
 
-# -------- Build / Check -------------------------------------------------------
+# -------- Build / Check -------------------------------------
 check:
 	$(CARGO) check --all-targets
-
 build:
 	$(CARGO) build --release
+build-backtest:
+	$(CARGO) build --example gridtrading_backtest_args --release
+	@echo "Built: $(BACKTEST_EXAMPLE)"
 
-# -------- Pipeline steps ------------------------------------------------------
+# -------- Pipeline steps ------------------------------------
+ticker:
+	@$(ACTIVATE) python $(PY_TICKER)
+
 convert:
-	$(CONDA_RUN) $(PY) $(PY_CONVERT) -c $(CONVERT_CFG) --strict
+	@$(ACTIVATE) python $(PY_CONVERT) -c $(CONVERT_CFG) --strict
 
 latency:
-	$(CONDA_RUN) $(PY) $(PY_LATENCY) -c $(LATENCY_CFG)
+	@$(ACTIVATE) python $(PY_LATENCY) -c $(LATENCY_CFG)
 
 convert-latency:
-	$(CONDA_RUN) $(PY) $(PY_CONVERT_LATENCY) -c $(CONVERT_LATENCY_CFG)	--strict
+	@$(ACTIVATE) python $(PY_CONVERT_LATENCY) -c $(CONVERT_LATENCY_CFG) --strict
 
-backtest: $(BACKTEST_BIN)
-	$(CONDA_RUN) $(PY) $(PY_BACKTEST) -c $(BACKTEST_CFG)
+snapshot:
+	@$(ACTIVATE) python $(PY_SNAPSHOT) -c $(SNAPSHOT_CFG)
 
-# Ensure the binary exists before backtest (useful if Python expects it)
-$(BACKTEST_BIN):
-	$(CARGO) build --release
+backtest: build-backtest
+	@$(ACTIVATE) python $(PY_BACKTEST) -c $(BACKTEST_CFG)
 
-# Full chain
-pipeline: convert latency build backtest
+gridsearch: build-backtest
+	@$(ACTIVATE) python $(PY_GRIDSEARCH) -c $(GRIDSEARCH_CFG)
 
-# -------- Cleaning ------------------------------------------------------------
+stats:
+	@$(ACTIVATE) python $(PY_STATS) -c $(BACKTEST_CFG)
+
+pipeline: convert-latency snapshot build-backtest backtest
+
+# -------- Cleaning ------------------------------------------
 clean:
 	$(CARGO) clean
-
 clean-out:
 	@if [ -d "$(OUT_DIR)" ]; then rm -rf "$(OUT_DIR)"; else echo "[skip] $(OUT_DIR) does not exist"; fi
-
 clean-all: clean clean-out

@@ -5,7 +5,7 @@ import argparse
 import yaml
 import multiprocessing as mp
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 from datetime import datetime, timedelta
 
 import numpy as np
@@ -13,14 +13,16 @@ import polars as pl
 from numba import njit
 from tqdm.auto import tqdm
 
-from util.ticker_helper import fetch_binance_futures_info
 from hftbacktest import EXCH_EVENT, LOCAL_EVENT
 
 
 # ----------------------------- latency kernel -----------------------------
 
+
 @njit
-def generate_order_latency_nb(data, order_latency, mul_entry, offset_entry, mul_resp, offset_resp):
+def generate_order_latency_nb(
+    data, order_latency, mul_entry, offset_entry, mul_resp, offset_resp
+):
     """
     data: structured array with fields ['exch_ts', 'local_ts']
     order_latency: structured array with dtype [('req_ts','i8'), ('exch_ts','i8'), ('resp_ts','i8'), ('_padding','i8')]
@@ -31,35 +33,43 @@ def generate_order_latency_nb(data, order_latency, mul_entry, offset_entry, mul_
         feed_latency = local_ts - exch_ts
 
         order_entry_latency = mul_entry * feed_latency + offset_entry
-        order_resp_latency  = mul_resp  * feed_latency + offset_resp
+        order_resp_latency = mul_resp * feed_latency + offset_resp
 
         req_ts = local_ts
         order_exch_ts = req_ts + order_entry_latency
         resp_ts = order_exch_ts + order_resp_latency
 
-        order_latency[i].req_ts  = req_ts
+        order_latency[i].req_ts = req_ts
         order_latency[i].exch_ts = order_exch_ts
         order_latency[i].resp_ts = resp_ts
 
 
 # ----------------------------- helpers -----------------------------
 
+
 def _norm_date_strs(d: str) -> Tuple[str, str]:
     """Return ('YYYY-MM-DD', 'YYYYMMDD') from either 'YYYY-MM-DD' or 'YYYYMMDD'."""
     s = d.strip().replace("/", "-")
     if "-" in s:
         yyyy, mm, dd = s.split("-")
-        return f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}", f"{yyyy}{mm.zfill(2)}{dd.zfill(2)}"
+        return (
+            f"{yyyy}-{mm.zfill(2)}-{dd.zfill(2)}",
+            f"{yyyy}{mm.zfill(2)}{dd.zfill(2)}",
+        )
     if len(s) == 8 and s.isdigit():
         return f"{s[0:4]}-{s[4:6]}-{s[6:8]}", s
     raise ValueError(f"Bad date: {d}")
 
 
-def _iter_dates(dates: Optional[List[str]], date_from: Optional[str], date_to: Optional[str]) -> List[Tuple[str, str]]:
+def _iter_dates(
+    dates: Optional[List[str]], date_from: Optional[str], date_to: Optional[str]
+) -> List[Tuple[str, str]]:
     if dates:
         return [_norm_date_strs(d) for d in dates]
     if not (date_from and date_to):
-        raise ValueError("Provide either 'dates' list or both 'date_from' and 'date_to' in YAML.")
+        raise ValueError(
+            "Provide either 'dates' list or both 'date_from' and 'date_to' in YAML."
+        )
     d0 = datetime.strptime(_norm_date_strs(date_from)[1], "%Y%m%d")
     d1 = datetime.strptime(_norm_date_strs(date_to)[1], "%Y%m%d")
     out: List[Tuple[str, str]] = []
@@ -81,8 +91,14 @@ def _feed_path(feeds_root: str, exchange: str, symbol: str, yyyymmdd: str) -> st
     return os.path.join(feeds_root, exchange, symbol, f"{yyyymmdd}.npz")
 
 
-def _latency_out_path(latency_root: str, exchange: str, symbol: str, yyyymmdd: str,
-                      include_symbol_dir: bool, filename_template: str) -> str:
+def _latency_out_path(
+    latency_root: str,
+    exchange: str,
+    symbol: str,
+    yyyymmdd: str,
+    include_symbol_dir: bool,
+    filename_template: str,
+) -> str:
     # filename_template supports "{date}" placeholder
     fname = filename_template.replace("{date}", yyyymmdd)
     if include_symbol_dir:
@@ -114,8 +130,12 @@ class Job:
 def _one_latency_job(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
     logs: List[str] = []
     try:
-        logs.append(f"[START] exch={job.exchange} sym={job.symbol} date={job.date_ymd} bucket={job.bucket_every}")
-        feed_file = _feed_path(job.feeds_root, job.exchange, job.symbol, job.symbol+"_"+job.date_ymd)
+        logs.append(
+            f"[START] exch={job.exchange} sym={job.symbol} date={job.date_ymd} bucket={job.bucket_every}"
+        )
+        feed_file = _feed_path(
+            job.feeds_root, job.exchange, job.symbol, job.symbol + "_" + job.date_ymd
+        )
         if not os.path.exists(feed_file):
             msg = f"Missing feed file: {feed_file}"
             logs.append(f"[MISS] {msg}")
@@ -128,7 +148,8 @@ def _one_latency_job(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
         # Filter events with both EXCH_EVENT and LOCAL_EVENT bits set
         df = (
             df.filter(
-                (pl.col("ev") & EXCH_EVENT == EXCH_EVENT) & (pl.col("ev") & LOCAL_EVENT == LOCAL_EVENT)
+                (pl.col("ev") & EXCH_EVENT == EXCH_EVENT)
+                & (pl.col("ev") & LOCAL_EVENT == LOCAL_EVENT)
             )
             .with_columns(pl.col("local_ts").alias("ts"))
             .group_by_dynamic("ts", every=job.bucket_every)
@@ -140,12 +161,14 @@ def _one_latency_job(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
         )
 
         # Convert to structured array with fields ['exch_ts', 'local_ts']
-        g = df.to_struct()  # single struct column
+        # g = df.to_struct()  # single struct column
         # Safer: build numpy structured explicitly to ensure fields/order
         np_data = df.select(["exch_ts", "local_ts"]).to_numpy(structured=True)
 
         # Allocate output latency array
-        out_dtype = np.dtype([("req_ts", "i8"), ("exch_ts", "i8"), ("resp_ts", "i8"), ("_padding", "i8")])
+        out_dtype = np.dtype(
+            [("req_ts", "i8"), ("exch_ts", "i8"), ("resp_ts", "i8"), ("_padding", "i8")]
+        )
         out_arr = np.zeros(len(np_data), dtype=out_dtype)
 
         # Compute order latency
@@ -182,8 +205,11 @@ def _one_latency_job(job: Job) -> Tuple[str, str, Optional[str], List[str]]:
 
 # ----------------------------- main -----------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Generate order-latency npz from order feed npz using YAML and multiprocessing.")
+    parser = argparse.ArgumentParser(
+        description="Generate order-latency npz from order feed npz using YAML and multiprocessing."
+    )
     parser.add_argument("-c", "--config", required=True, help="Path to YAML config")
     args = parser.parse_args()
 
@@ -191,7 +217,7 @@ def main():
         cfg = yaml.safe_load(f)
 
     # IO roots
-    feeds_root: str   = cfg.get("feeds_root", "/data/tmp/tardis_bn_hft")
+    feeds_root: str = cfg.get("feeds_root", "/data/tmp/tardis_bn_hft")
     latency_root: str = cfg["latency_root"]
 
     # Universe
@@ -213,18 +239,22 @@ def main():
     date_pairs = _iter_dates(dates_cfg, date_from, date_to)
 
     # Group-by bucket (match sample default: '1000000i'; make configurable)
-    bucket_every: str = cfg.get("bucket_every", "1000000i")  # tune if your timestamps are μs -> e.g., '1000000i' for 1s
+    bucket_every: str = cfg.get(
+        "bucket_every", "1000000i"
+    )  # tune if your timestamps are μs -> e.g., '1000000i' for 1s
 
     # Latency synthesis params
-    mul_entry: float   = float(cfg.get("mul_entry", 1))
-    mul_resp: float    = float(cfg.get("mul_resp", 1))
-    offset_entry: int  = int(cfg.get("offset_entry", 0))
-    offset_resp: int   = int(cfg.get("offset_resp", 0))
+    mul_entry: float = float(cfg.get("mul_entry", 1))
+    mul_resp: float = float(cfg.get("mul_resp", 1))
+    offset_entry: int = int(cfg.get("offset_entry", 0))
+    offset_resp: int = int(cfg.get("offset_resp", 0))
 
     # Output naming
     include_symbol_dir: bool = bool(cfg.get("include_symbol_dir", True))
-    filename_template: str   = cfg.get("filename_template", "latency_{date}.npz")  # {date} -> YYYYMMDD
-    overwrite: bool          = bool(cfg.get("overwrite", True))
+    filename_template: str = cfg.get(
+        "filename_template", "latency_{date}.npz"
+    )  # {date} -> YYYYMMDD
+    overwrite: bool = bool(cfg.get("overwrite", True))
 
     # Build jobs
     jobs: List[Job] = []
@@ -254,15 +284,27 @@ def main():
     print(f"[latency] dates={[d[1] for d in date_pairs]}")
     print(f"[latency] feeds_root={feeds_root}")
     print(f"[latency] latency_root={latency_root}")
-    print(f"[latency] bucket_every={bucket_every} mul_entry={mul_entry} offset_entry={offset_entry} mul_resp={mul_resp} offset_resp={offset_resp}")
-    print(f"[latency] filename_template={filename_template} include_symbol_dir={include_symbol_dir} overwrite={overwrite}")
+    print(
+        f"[latency] bucket_every={bucket_every} mul_entry={mul_entry} offset_entry={offset_entry} mul_resp={mul_resp} offset_resp={offset_resp}"
+    )
+    print(
+        f"[latency] filename_template={filename_template} include_symbol_dir={include_symbol_dir} overwrite={overwrite}"
+    )
 
     # Multiprocessing
-    ctx = mp.get_context("spawn") if sys.platform.startswith("win") else mp.get_context("fork")
+    ctx = (
+        mp.get_context("spawn")
+        if sys.platform.startswith("win")
+        else mp.get_context("fork")
+    )
     total = len(jobs)
-    with ctx.Pool(processes=int(cfg.get("num_proc", max(1, mp.cpu_count() // 2)))) as pool:
+    with ctx.Pool(
+        processes=int(cfg.get("num_proc", max(1, mp.cpu_count() // 2)))
+    ) as pool:
         it = pool.imap_unordered(_one_latency_job, jobs, chunksize=1)
-        for sym, d, err, logs in tqdm(it, total=total, desc="Generating order latency", unit="combo"):
+        for sym, d, err, logs in tqdm(
+            it, total=total, desc="Generating order latency", unit="combo"
+        ):
             for line in logs:
                 tqdm.write(line)
             if err is None:

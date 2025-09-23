@@ -1,0 +1,31 @@
+# Where your converted feeds live (same base_root used by backtest)
+base_root: "/data/tmp/tardis_bn_hft"
+exchange: "binance-futures"
+symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+
+# Date or range to build snapshot from
+date_from: 20250129
+date_to:   20250131
+# Or: dates: [20250201, 20250202]
+
+# Output location (defaults to {base_root}/data if omitted)
+output_root: "/data/tmp/tardis_bn_hft/data"
+
+# Produce one snapshot per day (EOD → next day's SOD), otherwise a single snapshot at the end
+per_day: false
+
+# When true, error if any requested feed is missing
+strict: true
+
+# Name suffix in files, e.g. SOLUSDT_20250202_SOD.npz
+suffix: "EOD"
+
+# Optional: use previous day's SOD automatically as the starting snapshot
+# - null: start from empty book
+# - "auto-prev": look for {output_root}/{exchange}/{symbol}/{symbol}_{prev}_SOD.npz
+initial_snapshot: "None"
+
+# Supply sizes directly, or via tickers.json, or let the script fetch missing ones.
+# tick_size: { SOLUSDT: 0.01 }
+# lot_size:  { SOLUSDT: 0.01 }
+tickers_json: "./ticker_8.json"

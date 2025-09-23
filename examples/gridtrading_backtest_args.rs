@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, ValueEnum, ArgAction};
 use hftbacktest::{
     backtest::{
         assettype::LinearAsset,
@@ -9,13 +9,15 @@ use hftbacktest::{
         },
         recorder::BacktestRecorder,
         Backtest, ExchangeKind, L2AssetBuilder,
-    },
-    prelude::{ApplySnapshot, Bot, HashMapMarketDepth},
+    }, depth::MarketDepth, prelude::{ApplySnapshot, Bot, HashMapMarketDepth}
 };
+use hftbacktest::depth::{INVALID_MIN, INVALID_MAX};
 use statmm::algo::{
     grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair, grid_weighted_depth_fair,
     Transform,
 };
+use tracing_subscriber::{fmt, EnvFilter};
+use tracing::{trace, debug, info, warn, error};
 
 #[derive(Debug, Clone, ValueEnum)]
 enum AlgoKind {
@@ -111,7 +113,7 @@ struct Args {
     #[arg(long)]
     look_depth_pct: Option<f64>,
     /// OBI: use (B-A)/(B+A) instead of raw B-A
-    #[arg(long, default_value_t = true)]
+    #[arg(long, action = ArgAction::SetTrue)]
     normalize: bool,
     /// OBI: scale alpha -> price (c1)
     #[arg(long)]
@@ -146,10 +148,12 @@ fn prepare_backtest(
     let asset_type = LinearAsset::new(1.0);
     let queue_model = ProbQueueModel::new(PowerProbQueueFunc3::new(queue_power));
 
-    Backtest::builder()
+    let hbt = Backtest::builder()
         .add_asset(
             L2AssetBuilder::new()
-                .data(data_files.into_iter().map(DataSource::File).collect())
+                .data(data_files.iter()
+                        .map(|file| DataSource::File(file.clone()))
+                        .collect(),)
                 .latency_model(latency_model)
                 .asset_type(asset_type)
                 .fee_model(TradingValueFeeModel::new(CommonFees::new(maker_fee, taker_fee)))
@@ -160,6 +164,7 @@ fn prepare_backtest(
                     if let Some(file) = initial_snapshot.as_ref() {
                         if let Ok(npz) = read_npz_file(file, "data") {
                             depth.apply_snapshot(&npz);
+                            warn!("Applied initial snapshot from {}", file);
                         }
                     }
                     depth
@@ -168,7 +173,8 @@ fn prepare_backtest(
                 .unwrap(),
         )
         .build()
-        .unwrap()
+        .unwrap();
+    hbt
 }
 
 fn build_transform(kind: TransformKind, window: Option<usize>, ema_alpha: Option<f64>) -> Transform {
@@ -187,9 +193,13 @@ fn build_transform(kind: TransformKind, window: Option<usize>, ema_alpha: Option
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
+    let _ = fmt()
+        .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
+        .with_target(true)  // show module path
+        .with_level(true)   // show log level
+        .try_init();
     let args = Args::parse();
-
+    warn!(?args, "CLI args parsed");
     let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
 
     let mut hbt = prepare_backtest(
@@ -202,6 +212,20 @@ fn main() {
         args.taker_fee,
         args.queue_power,
     );
+
+
+    let d = hbt.depth(0);
+    tracing::warn!(
+        target: "statmm",
+        "post-build depth: bid={} ask={} bid_tick={} ask_tick={} tick_size={} lot_size={}",
+        d.best_bid(),
+        d.best_ask(),
+        d.best_bid_tick(),
+        d.best_ask_tick(),
+        d.tick_size(),
+        d.lot_size()
+    );
+
     let mut recorder = BacktestRecorder::new(&hbt);
 
     let transform = build_transform(args.transform, args.window, args.ema_alpha);
