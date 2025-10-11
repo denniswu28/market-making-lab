@@ -13,7 +13,7 @@ use hftbacktest::{
 };
 use hftbacktest::depth::{INVALID_MIN, INVALID_MAX};
 use statmm::algo::{
-    grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair, grid_weighted_depth_fair,
+    grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair, grid_weighted_depth_fair, grid_glft_simplified,
     Transform,
 };
 use tracing_subscriber::{fmt, EnvFilter};
@@ -29,6 +29,8 @@ enum AlgoKind {
     WeightedDepth,
     /// Effective-VAMP (side-weighted prices) as fair price
     VampEffective,
+    /// GLFT-style simplified: volatility-widened half-spread + mid transform
+    GlftSimple,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -126,6 +128,13 @@ struct Args {
     /// Weighted-depth: target qty per side
     #[arg(long)]
     target_qty_per_side: Option<f64>,
+
+    /// GLFT-simple: rolling return std window (ticks)
+    #[arg(long, default_value_t = 600_usize)]
+    glft_vol_window: usize,
+    /// GLFT-simple: additive widening coefficient (rhs_eff = rhs + vol_scale * sigma)
+    #[arg(long, default_value_t = 0.0)]
+    glft_vol_scale: f64,
 }
 
 fn prepare_backtest(
@@ -151,9 +160,12 @@ fn prepare_backtest(
     let hbt = Backtest::builder()
         .add_asset(
             L2AssetBuilder::new()
-                .data(data_files.iter()
+                .data(
+                    data_files
+                        .iter()
                         .map(|file| DataSource::File(file.clone()))
-                        .collect(),)
+                        .collect(),
+                )
                 .latency_model(latency_model)
                 .asset_type(asset_type)
                 .fee_model(TradingValueFeeModel::new(CommonFees::new(maker_fee, taker_fee)))
@@ -194,9 +206,9 @@ fn build_transform(kind: TransformKind, window: Option<usize>, ema_alpha: Option
 
 fn main() {
     let _ = fmt()
-        .with_env_filter(EnvFilter::from_default_env()) // reads RUST_LOG
-        .with_target(true)  // show module path
-        .with_level(true)   // show log level
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_target(true)
+        .with_level(true)
         .try_init();
     let args = Args::parse();
     warn!(?args, "CLI args parsed");
@@ -213,24 +225,9 @@ fn main() {
         args.queue_power,
     );
 
-
-    let d = hbt.depth(0);
-    tracing::warn!(
-        target: "statmm",
-        "post-build depth: bid={} ask={} bid_tick={} ask_tick={} tick_size={} lot_size={}",
-        d.best_bid(),
-        d.best_ask(),
-        d.best_bid_tick(),
-        d.best_ask_tick(),
-        d.tick_size(),
-        d.lot_size()
-    );
-
     let mut recorder = BacktestRecorder::new(&hbt);
-
     let transform = build_transform(args.transform, args.window, args.ema_alpha);
 
-    // Dispatch to the chosen algo
     match args.algo {
         AlgoKind::ObiStaticAlpha => {
             let depth = args
@@ -274,16 +271,16 @@ fn main() {
                 args.max_position,
                 vamp_depth,
                 transform,
-                0.0, // no alpha scale for fair-price models
+                0.0,
                 args.elapse_ns,
                 args.record_every,
             )
             .unwrap();
         }
         AlgoKind::WeightedDepth => {
-            let tgt = args.target_qty_per_side.expect(
-                "--target-qty-per-side is required for --algo weighted-depth",
-            );
+            let tgt = args
+                .target_qty_per_side
+                .expect("--target-qty-per-side is required for --algo weighted-depth");
             grid_weighted_depth_fair::<HashMapMarketDepth, _, _>(
                 &mut hbt,
                 &mut recorder,
@@ -319,6 +316,28 @@ fn main() {
                 vamp_depth,
                 transform,
                 0.0,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .unwrap();
+        }
+        AlgoKind::GlftSimple => {
+            // For ZScore transform, alpha_scale is used as z->price multiplier; default to 0 if not set.
+            let z_k = args.alpha_scale.unwrap_or(0.0);
+            grid_glft_simplified::<HashMapMarketDepth, _, _>(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.glft_vol_window,
+                args.glft_vol_scale,
+                transform,
+                z_k,
                 args.elapse_ns,
                 args.record_every,
             )

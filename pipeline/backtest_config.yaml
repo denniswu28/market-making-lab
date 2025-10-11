@@ -1,21 +1,25 @@
 # Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
-symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+# symbols: ["SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+symbols: ["BTCUSDT"]
+
 
 # Date range
-date_from: 20250201
-date_to:   20250210
+date_from: 20250629
+date_to:   20250831
 
 # Optional SOD snapshot (per symbol you can leave blank)
 # initial_snapshot: "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250131_EOD.npz"
    # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
+# initial_snapshot:
+#   "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
 
 # Path to compiled Rust binary (relative to repo root is fine)
 binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
 
 # Parallelism
-num_proc: 4
+num_proc: 1
 
 # Fees / Queue model
 fees:
@@ -32,18 +36,18 @@ defaults:
 tickers_json: "pipeline/ticker_8.json"
 
 # backtest params
-elapse_ns: 100000000
+elapse_ns: 1000000000
 rust_log: "error" 
 
 # Grid parameters (shared)
 grid:
-  relative_half_spread: 0.0005
-  relative_grid_interval: 0.0005
-  grid_num: 20
+  relative_half_spread: 0.0006
+  relative_grid_interval: 0.0006
+  grid_num: 1
   min_grid_step_override: null  # null => use tick_size
   skew_override: null           # null => rel_half_spread / grid_num
-  order_value_usd: 100
-  max_position_in_grids: 10
+  order_value_usd: 10000
+  max_position_in_grids: 50
 
 # Alpha/price model selection
 algo:
@@ -51,7 +55,7 @@ algo:
   params:
     look_depth_pct: 0.025    # for obi-static-alpha
     normalize: true          # for obi-static-alpha
-    alpha_scale: 100.0       # for obi-static-alpha
+    alpha_scale: 160.0       # for obi-static-alpha
     vamp_depth_pct: 0.02     # for vamp / vamp-effective
     target_qty_per_side: 500 # for weighted-depth
 
@@ -62,4 +66,4 @@ transform:
   ema_alpha: 0.1       # for ema
 
 # Output
-out_path: "./out"      # CSVs per symbol are written here
+out_path: "./out/test_btc"      # CSVs per symbol are written here

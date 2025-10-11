@@ -690,6 +690,137 @@ where
     )
 }
 
+#[derive(Clone)]
+struct RollingStd {
+    n: usize,
+    buf: Vec<f64>,
+    head: usize,
+    len: usize,
+    sum: f64,
+    sum2: f64,
+    eps: f64,
+}
+impl RollingStd {
+    fn new(n: usize) -> Self {
+        Self {
+            n,
+            buf: vec![0.0; n.max(1)],
+            head: 0,
+            len: 0,
+            sum: 0.0,
+            sum2: 0.0,
+            eps: 1e-12,
+        }
+    }
+    fn update(&mut self, x: f64) -> f64 {
+        if self.n == 0 { return 0.0; }
+        if self.len < self.n {
+            self.buf[self.head] = x;
+            self.sum += x;
+            self.sum2 += x * x;
+            self.head = (self.head + 1) % self.n;
+            self.len += 1;
+        } else {
+            let old = self.buf[self.head];
+            self.buf[self.head] = x;
+            self.sum += x - old;
+            self.sum2 += x * x - old * old;
+            self.head = (self.head + 1) % self.n;
+        }
+        let mean = self.sum / self.len as f64;
+        let var = (self.sum2 / self.len as f64) - mean * mean;
+        var.max(0.0).sqrt()
+    }
+}
+
+// --- NEW: GLFT-simplified algo ----------------------------------------------------
+#[allow(clippy::too_many_arguments)]
+pub fn grid_glft_simplified<MD, I, R>(
+    hbt: &mut I,
+    recorder: &mut R,
+    base_relative_half_spread: f64,
+    relative_grid_interval: f64,
+    grid_num: usize,
+    min_grid_step: f64,
+    skew: f64,
+    order_qty: f64,
+    max_position_qty: f64,
+    // GLFT-like knobs
+    vol_window: usize,        // e.g. 600 (seconds-worth of ticks if elapse_ns=1s)
+    vol_scale: f64,           // additive widening: rhs_eff = base_rhs + vol_scale * sigma
+    price_transform: Transform,     // None | SMA(window) | EMA(alpha) | ZScore(window)
+    z_as_alpha_scale: f64,    // if Transform::ZScore, mid + k * z
+    elapse_ns: i64,
+    record_every: usize,
+) -> Result<(), i64>
+where
+    MD: MarketDepth,
+    I: Bot<MD>,
+    <I as Bot<MD>>::Error: std::fmt::Debug,
+    R: Recorder,
+    <R as Recorder>::Error: std::fmt::Debug,
+{
+    let mut tf = price_transform.to_state();
+    let mut rstd = RollingStd::new(vol_window);
+    let mut prev_mid: Option<f64> = None;
+
+    // Optional initial record once BBO is ready (helps zero baseline)
+    if hbt.depth(0).best_bid_tick() != INVALID_MIN && hbt.depth(0).best_ask_tick() != INVALID_MAX {
+        recorder.record(hbt).unwrap();
+    }
+
+    let mut k = 0usize;
+    while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
+        k += 1;
+        trace!(k=k, ts=hbt.current_timestamp(), "glft loop");
+
+        if k % record_every == 0 {
+            recorder.record(hbt).unwrap();
+        }
+
+        let d = hbt.depth(0);
+        let bb = d.best_bid();
+        let ba = d.best_ask();
+        if bb.is_nan() || ba.is_nan() {
+            continue; // wait for BBO
+        }
+        let mid = 0.5 * (bb + ba) as f64;
+
+        // rolling return std (simple pct return)
+        let ret = if let Some(pm) = prev_mid {
+            if pm != 0.0 { (mid / pm) - 1.0 } else { 0.0 }
+        } else { 0.0 };
+        prev_mid = Some(mid);
+        let sigma = rstd.update(ret);
+
+        // fair price via transform
+        let fair = match price_transform {
+            Transform::ZScore { .. } => {
+                let z = tf.apply(mid);
+                mid + z_as_alpha_scale * z
+            }
+            _ => tf.apply(mid),
+        };
+
+        // dynamic half-spread (GLFT-style widening by volatility)
+        let rhs_eff = (base_relative_half_spread + vol_scale * sigma).max(0.0);
+
+        // drive the grid
+        update_grid::<I, MD>(
+            hbt,
+            fair,
+            rhs_eff,
+            relative_grid_interval,
+            min_grid_step,
+            skew,
+            order_qty,
+            max_position_qty,
+            grid_num,
+        )?;
+    }
+    Ok(())
+}
+
 /// ------------------------------------------------------------
 /// Your original no-alpha grid for completeness (unchanged)
 /// ------------------------------------------------------------
