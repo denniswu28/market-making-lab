@@ -7,17 +7,17 @@ tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
 keep_temps: false
 
 exchange: "binance-futures"
-# symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
-symbols: ['ONDOUSDT']
+symbols: ["SOLUSDC", "SUIUSDC", "BNBUSDC", "WIFUSDC", "WLDUSDC", "1000SHIBUSDC", "1000PEPEUSDC", "ORDIUSDC", "UNIUSDC", "NEOUSDC", "KAITOUSDC"]
+# symbols: ['ONDOUSDT']
 
 # Dates: either explicit list OR range (inclusive)
 # dates: ["2024-05-01", "2024-05-02"]
-date_from: "2025-06-29"
-date_to:   "2025-08-31"
+date_from: "2025-09-01"
+date_to:   "2025-10-10"
 
 # ===== Convert settings =====
 snapshot_mode: "auto"     # auto | process | ignore_sod | ignore
-sod_date: "2025-06-29"    # first backtest day (used by 'auto')
+sod_date: "2025-09-01"    # first backtest day (used by 'auto')
 
 use_quotes: false
 
@@ -28,7 +28,7 @@ base_latency: 0.0
 
 output_format: "npz"          # MUST be 'npz' for latency step
 delete_inputs_after: false
-skip_existing_feed: true      # skip convert if feed npz already exists
+skip_existing_feed: false      # skip convert if feed npz already exists
 
 # ===== Latency settings =====
 bucket_every: "1000000000i" # timestamp tick size

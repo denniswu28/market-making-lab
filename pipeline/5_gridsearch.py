@@ -1,4 +1,3 @@
-# pipeline/5_gridsearch.py
 from __future__ import annotations
 import argparse
 import glob
@@ -64,6 +63,10 @@ def _algo_tag(algo_cfg: Dict[str, Any]) -> str:
     if nm == "weighted-depth":
         t = f(p.get("target_qty_per_side", 500.0))
         return f"wdepth-t{t}"
+    if nm == "glft-simple":
+        w = int(p.get("glft_vol_window", 6000))
+        s = f(p.get("glft_vol_scale", 0.5))
+        return f"glft-w{w}-s{s}"
     return nm
 
 def _name_for_run(sym: str, rhs: float, rgi: float, n: int, skew: float,
@@ -191,7 +194,7 @@ def _build_cmd(
     if name_algo == "obi-static-alpha":
         args += [
             "--look-depth-pct", str(p.get("look_depth_pct", 0.02)),
-            "--alpha-scale", str(p.get("alpha_scale", 50.0)),
+            "--alpha-scale",    str(p.get("alpha_scale", 50.0)),
         ]
         if p.get("normalize", True):
             args += ["--normalize"]
@@ -199,6 +202,12 @@ def _build_cmd(
         args += ["--vamp-depth-pct", str(p.get("vamp_depth_pct", 0.02))]
     elif name_algo == "weighted-depth":
         args += ["--target-qty-per-side", str(p.get("target_qty_per_side", 500.0))]
+    elif name_algo == "glft-simple":
+        args += [
+            "--glft-vol-window", str(int(p.get("glft_vol_window", 6000))),
+            "--glft-vol-scale",  str(p.get("glft_vol_scale", 0.5)),
+        ]
+        # Do NOT pass any other GLFT flags if your binary doesn't expose them.
     else:
         raise ValueError(f"Unsupported algo: {name_algo}")
 
@@ -246,15 +255,9 @@ def _symbol_base_grid(symbol: str, tickers: Dict[str, Any], cfg: Dict[str, Any])
     g["max_position"] = g["max_position_in_grids"] * g["order_qty"]
     return dict(tick_size=tick_size, lot_size=lot_size, grid=g)
 
-# --------------------------- transform variants (NEW) ---------------------------
+# --------------------------- transform variants ---------------------------
 
 def _transform_variants(cfg_transform: Dict[str, Any], gs_transform: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    gridsearch.transform supports:
-      kind: single or list of ["none","sma","ema","zscore"]
-      window: single or list (for sma/zscore)
-      ema_alpha: single or list (for ema)
-    """
     base = dict(cfg_transform)
     if not gs_transform:
         return [base]
@@ -308,6 +311,11 @@ class RunSpec:
 
 # --------------------------- build runs ---------------------------
 
+def _as_list(v) -> List[Any]:
+    if isinstance(v, (list, tuple)):
+        return list(v)
+    return [v]
+
 def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
     base = cfg["base_root"]
     exch = cfg["exchange"]
@@ -331,7 +339,6 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
     rgi_same = (isinstance(rgi_vals, str) and rgi_vals.lower() == "same")
 
     skew_mode = gs.get("skew_mode", "rel_over_n")  # "rel_over_n" | "fixed"
-    skew_fixed_val = float(gs.get("skew_fixed_value", 0.0))
     mp_mode = gs.get("max_position_mode", "as_in_config")  # "as_in_config" | "equal_to_grid_num"
 
     # Optional algo param sweeps (e.g., alpha_scale list)
@@ -346,14 +353,21 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
         "grid_num": grid_num_list,
     }
     if not rgi_same:
-        # allow scalar or list for rgi
         if isinstance(rgi_vals, (list, tuple)):
             param_grid["relative_grid_interval"] = list(rgi_vals)
         else:
             param_grid["relative_grid_interval"] = [rgi_vals]
 
+    # Allow skew as a *list* when skew_mode == "fixed"
+    if skew_mode == "fixed":
+        skew_vals = gs.get("skew_fixed_value", [cfg["grid"].get("skew_override", 0.0)])
+        if not isinstance(skew_vals, (list, tuple)):
+            skew_vals = [skew_vals]
+        param_grid["skew_fixed_value"] = list(skew_vals)
+
+    # Algo overrides become independent axes (e.g., glft_vol_scale sweep)
     for k, vals in algo_overrides.items():
-        param_grid[f"algo::{k}"] = vals
+        param_grid[f"algo::{k}"] = vals if isinstance(vals, (list, tuple)) else [vals]
 
     time_ctrl = dict(
         elapse_ns    = cfg.get("elapse_ns", 1_000_000_000),
@@ -378,12 +392,17 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
             g = dict(base_params["grid"])
             rhs = float(combo["rel_half_spread"])
             n   = int(combo["grid_num"])
-            rgi = rhs if rgi_same else float(combo["relative_grid_interval"])
+            rgi = rhs if rgi_same else float(combo.get("relative_grid_interval", rhs))
 
             g["relative_half_spread"]   = rhs
             g["relative_grid_interval"] = rgi
             g["grid_num"]               = n
-            g["skew"] = (rhs / n) if skew_mode == "rel_over_n" else skew_fixed_val
+
+            if skew_mode == "rel_over_n":
+                g["skew"] = (rhs / n) if n != 0 else 0.0
+            else:
+                g["skew"] = float(combo["skew_fixed_value"])
+
             if mp_mode == "equal_to_grid_num":
                 g["max_position"] = g["order_qty"] * n
 

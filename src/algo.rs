@@ -85,6 +85,43 @@ impl RollingEMA {
     }
 }
 
+#[derive(Clone)]
+struct RollingStd {
+    n: usize,
+    buf: Vec<f64>,
+    head: usize,
+    len: usize,
+    sum: f64,
+    sum2: f64,
+}
+impl RollingStd {
+    fn new(n: usize) -> Self {
+        Self { n: n.max(1), buf: vec![0.0; n.max(1)], head: 0, len: 0, sum: 0.0, sum2: 0.0 }
+    }
+    fn push(&mut self, x: f64) {
+        if self.len < self.n {
+            self.buf[self.head] = x;
+            self.sum  += x;
+            self.sum2 += x * x;
+            self.head = (self.head + 1) % self.n;
+            self.len  += 1;
+        } else {
+            let old = self.buf[self.head];
+            self.buf[self.head] = x;
+            self.sum  += x - old;
+            self.sum2 += x * x - old * old;
+            self.head = (self.head + 1) % self.n;
+        }
+    }
+    fn std(&self) -> f64 {
+        if self.len == 0 { return f64::NAN; }
+        let m = self.sum / self.len as f64;
+        let v = (self.sum2 / self.len as f64) - m*m;
+        v.max(0.0).sqrt()
+    }
+}
+
+
 /// Time-series transform selection (applied to alpha OR price depending on algo)
 pub enum Transform {
     None,
@@ -690,68 +727,150 @@ where
     )
 }
 
-#[derive(Clone)]
-struct RollingStd {
-    n: usize,
-    buf: Vec<f64>,
-    head: usize,
-    len: usize,
-    sum: f64,
-    sum2: f64,
-    eps: f64,
-}
-impl RollingStd {
-    fn new(n: usize) -> Self {
-        Self {
-            n,
-            buf: vec![0.0; n.max(1)],
-            head: 0,
-            len: 0,
-            sum: 0.0,
-            sum2: 0.0,
-            eps: 1e-12,
-        }
-    }
-    fn update(&mut self, x: f64) -> f64 {
-        if self.n == 0 { return 0.0; }
-        if self.len < self.n {
-            self.buf[self.head] = x;
-            self.sum += x;
-            self.sum2 += x * x;
-            self.head = (self.head + 1) % self.n;
-            self.len += 1;
-        } else {
-            let old = self.buf[self.head];
-            self.buf[self.head] = x;
-            self.sum += x - old;
-            self.sum2 += x * x - old * old;
-            self.head = (self.head + 1) % self.n;
-        }
-        let mean = self.sum / self.len as f64;
-        let var = (self.sum2 / self.len as f64) - mean * mean;
-        var.max(0.0).sqrt()
-    }
-}
+// #[allow(clippy::too_many_arguments)]
+// pub fn grid_glft_simplified<MD, I, R>(
+//     hbt: &mut I,
+//     recorder: &mut R,
+//     base_relative_half_spread: f64,
+//     _relative_grid_interval: f64,   // ignored; we tie grid interval to RHS dynamically
+//     grid_num: usize,
+//     min_grid_step: f64,
+//     skew: f64,
+//     order_qty: f64,                 // baseline qty → derive baseline notional from first mid
+//     max_position_qty: f64,
+//     // GLFT-like knobs
+//     vol_window: usize,              // rolling window length in *steps*
+//     vol_scale: f64,                 // ticks-per-sigma multiplier (tutorial’s vol_to_half_spread)
+//     _price_transform: Transform,    // kept for API parity (not used; tutorial uses microprice)
+//     _z_as_alpha_scale: f64,         // kept for API parity
+//     elapse_ns: i64,
+//     record_every: usize,
+//     vol_refresh_ns: i64,            // NEW: refresh cadence for σ updates
+// ) -> Result<(), i64>
+// where
+//     MD: MarketDepth,
+//     I: Bot<MD>,
+//     <I as Bot<MD>>::Error: std::fmt::Debug,
+//     R: Recorder,
+//     <R as Recorder>::Error: std::fmt::Debug,
+// {
+//     let mut rstd = RollingStd::new(vol_window);
 
-// --- NEW: GLFT-simplified algo ----------------------------------------------------
+//     let tick_size = hbt.depth(0).tick_size() as f64;
+//     let lot_size  = hbt.depth(0).lot_size()  as f64;
+
+//     let step_ns = elapse_ns.max(1);
+//     let refresh_steps = ((vol_refresh_ns.max(step_ns)) / step_ns) as usize;
+
+//     // sqrt(minutes) factor: with a vol_window of W steps, each step elapse_ns long
+//     // window_minutes = W * elapse_ns / 60e9 → multiplier = sqrt(window_minutes)
+//     let window_minutes = (vol_window as f64) * (elapse_ns as f64) / 60_000_000_000.0;
+//     let vol_time_mod = window_minutes.max(0.0).sqrt();
+
+//     let mut prev_mid_tick: Option<f64> = None;
+//     let mut samples: usize = 0;
+//     let mut sigma_tick: f64 = 0.0;           // start conservative
+//     let mut baseline_notional: Option<f64> = None;
+
+//     // Optional initial record once BBO is ready
+//     if hbt.depth(0).best_bid_tick() != INVALID_MIN && hbt.depth(0).best_ask_tick() != INVALID_MAX {
+//         recorder.record(hbt).unwrap();
+//     }
+
+//     let mut k = 0usize;
+//     while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
+//         k += 1;
+//         if k % record_every == 0 { recorder.record(hbt).unwrap(); }
+
+//         let d = hbt.depth(0);
+//         let bb  = d.best_bid();
+//         let ba  = d.best_ask();
+//         let bbq = d.best_bid_qty();
+//         let baq = d.best_ask_qty();
+
+//         if bb.is_nan() || ba.is_nan() { continue; } // wait for BBO
+
+//         let mid = 0.5 * (bb + ba) as f64;
+//         let fair = (bb as f64 * baq + ba as f64 * bbq) / (baq + bbq);
+
+//         // establish baseline notional from the passed-in order_qty on first tick with mid
+//         if baseline_notional.is_none() {
+//             baseline_notional = Some(order_qty.max(lot_size) * mid);
+//         }
+
+//         // rolling sigma in ticks
+//         let mid_tick = mid / tick_size;
+//         if let Some(pm) = prev_mid_tick {
+//             let d_tick = mid_tick - pm;
+//             let cur_std = rstd.update(d_tick); // <-- do NOT double-update
+//             samples += 1;
+
+//             if samples >= vol_window && (k % refresh_steps == 0) {
+//                 sigma_tick = cur_std * vol_time_mod;
+//             }
+//         }
+//         prev_mid_tick = Some(mid_tick);
+
+//         // half-spread in *ticks* and then → *relative*
+//         // tutorial: half_spread_tick = sigma_tick * vol_scale
+//         let half_spread_tick = (sigma_tick.max(0.0)) * vol_scale;
+//         let rhs_vol_rel = ((half_spread_tick * tick_size) / fair).max(0.0);
+//         // additive widening with configured base
+//         let rhs_eff = (base_relative_half_spread + rhs_vol_rel).max(0.0);
+//         // tie the grid interval to half-spread (tutorial behavior)
+//         let rgi_eff = rhs_eff;
+
+//         // dynamic order size to keep baseline notional approximately constant
+//         let oq_notional = baseline_notional.unwrap_or(order_qty.max(lot_size) * mid);
+//         let mut order_qty_dyn = (oq_notional / fair / lot_size).round();
+//         let order_qty_dyn = order_qty_dyn * lot_size;
+
+//         // let grids_cap = (max_position_qty / order_qty.max(lot_size)).max(0.0);
+//         let max_notional_position = 1000.0;
+
+//         let max_position_qty_dyn = (max_notional_position / mid).max(lot_size);
+
+//         let skew_tut = skew; // read from CLI/config (set to 1.0 for parity)
+//         let skew_eff = if max_notional_position > 0.0 {
+//             skew_tut * (order_qty_dyn * mid / max_notional_position)
+//         } else {
+//             0.0
+//         };
+
+//         // run the grid
+//         update_grid::<I, MD>(
+//             hbt,
+//             fair,
+//             rhs_eff,
+//             rgi_eff,         // keep tied to RHS (tutorial behavior)
+//             min_grid_step,
+//             skew_eff,        // <— dynamic skew matching tutorial math
+//             order_qty_dyn,   // dynamic $-anchored order size
+//             max_position_qty_dyn, // <— dynamic quantity cap matching tutorial notional cap
+//             grid_num,
+//         )?;
+//     }
+//     Ok(())
+// }
+
+
 #[allow(clippy::too_many_arguments)]
 pub fn grid_glft_simplified<MD, I, R>(
     hbt: &mut I,
     recorder: &mut R,
-    base_relative_half_spread: f64,
-    relative_grid_interval: f64,
+    // tutorial parameters
+    vol_to_half_spread: f64,    // "vol_to_half_spread" (scale)
+    min_grid_step: f64,         // price units
     grid_num: usize,
-    min_grid_step: f64,
     skew: f64,
-    order_qty: f64,
-    max_position_qty: f64,
-    // GLFT-like knobs
-    vol_window: usize,        // e.g. 600 (seconds-worth of ticks if elapse_ns=1s)
-    vol_scale: f64,           // additive widening: rhs_eff = base_rhs + vol_scale * sigma
-    price_transform: Transform,     // None | SMA(window) | EMA(alpha) | ZScore(window)
-    z_as_alpha_scale: f64,    // if Transform::ZScore, mid + k * z
-    elapse_ns: i64,
-    record_every: usize,
+    max_position_qty: f64,      // hard position cap in *qty*
+    // implementation knobs
+    vol_window_ticks: usize,    // typically 6000 for 10 minutes @100ms
+    order_value_usd: f64,       // $100 in the tutorial
+    max_notional_cap: Option<f64>, // optional fixed notional cap; if None use qty cap
+    // time control
+    elapse_ns: i64,             // 100_000_000 in tutorial (100ms)
+    record_every: usize,        // 10 in tutorial (record every 1s)
 ) -> Result<(), i64>
 where
     MD: MarketDepth,
@@ -760,64 +879,171 @@ where
     R: Recorder,
     <R as Recorder>::Error: std::fmt::Debug,
 {
-    let mut tf = price_transform.to_state();
-    let mut rstd = RollingStd::new(vol_window);
-    let mut prev_mid: Option<f64> = None;
+    let asset = 0usize;
+    let tick_size = hbt.depth(asset).tick_size() as f64;
+    let lot_size  = hbt.depth(asset).lot_size()  as f64;
 
-    // Optional initial record once BBO is ready (helps zero baseline)
-    if hbt.depth(0).best_bid_tick() != INVALID_MIN && hbt.depth(0).best_ask_tick() != INVALID_MAX {
-        recorder.record(hbt).unwrap();
-    }
+    // tutorial updates vol every 5s → derive from elapse_ns
+    let five_sec = 5_000_000_000_i64;
+    let vol_update_every = ((five_sec / elapse_ns).max(1)) as usize;
 
-    let mut k = 0usize;
+    let mut t: usize = 0;
+    let mut prev_mid_tick: f64 = f64::NAN;
+    let mut vol_tick_std: f64  = f64::NAN; // std of mid_tick change * sqrt(10)
+
+    let mut roll = RollingStd::new(vol_window_ticks);
+
     while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
-        k += 1;
-        trace!(k=k, ts=hbt.current_timestamp(), "glft loop");
+        t += 1;
 
-        if k % record_every == 0 {
-            recorder.record(hbt).unwrap();
-        }
+        // always clear inactive with a short, exclusive borrow
+        hbt.clear_inactive_orders(Some(asset));
 
-        let d = hbt.depth(0);
-        let bb = d.best_bid();
-        let ba = d.best_ask();
-        if bb.is_nan() || ba.is_nan() {
-            continue; // wait for BBO
-        }
-        let mid = 0.5 * (bb + ba) as f64;
-
-        // rolling return std (simple pct return)
-        let ret = if let Some(pm) = prev_mid {
-            if pm != 0.0 { (mid / pm) - 1.0 } else { 0.0 }
-        } else { 0.0 };
-        prev_mid = Some(mid);
-        let sigma = rstd.update(ret);
-
-        // fair price via transform
-        let fair = match price_transform {
-            Transform::ZScore { .. } => {
-                let z = tf.apply(mid);
-                mid + z_as_alpha_scale * z
+        // -------- READ-ONLY BLOCK (depth, prices, vol, build next grids) --------
+        // Collect everything we need without mutating hbt, then *drop* borrows.
+        let (maybe_new_bid, maybe_new_ask, order_qty) = {
+            let d = hbt.depth(asset);
+            let bb = d.best_bid();
+            let ba = d.best_ask();
+            if bb.is_nan() || ba.is_nan() {
+                if t % record_every == 0 { recorder.record(hbt).unwrap(); }
+                continue;
             }
-            _ => tf.apply(mid),
-        };
 
-        // dynamic half-spread (GLFT-style widening by volatility)
-        let rhs_eff = (base_relative_half_spread + vol_scale * sigma).max(0.0);
+            let bbq = d.best_bid_qty();
+            let baq = d.best_ask_qty();
+            if bbq <= 0.0 || baq <= 0.0 {
+                if t % record_every == 0 { recorder.record(hbt).unwrap(); }
+                continue;
+            }
 
-        // drive the grid
-        update_grid::<I, MD>(
-            hbt,
-            fair,
-            rhs_eff,
-            relative_grid_interval,
-            min_grid_step,
-            skew,
-            order_qty,
-            max_position_qty,
-            grid_num,
-        )?;
+            // micro & mid
+            let mid = 0.5 * (bb + ba) as f64;
+            let mp  = (bb as f64 * baq + ba as f64 * bbq) / (baq + bbq);
+
+            // volatility from mid tick deltas
+            let mid_tick = mid / tick_size;
+            if prev_mid_tick.is_finite() {
+                roll.push(mid_tick - prev_mid_tick);
+                if t % vol_update_every == 0 && roll.len >= vol_window_ticks {
+                    vol_tick_std = roll.std() * 10f64.sqrt();
+                }
+            }
+            prev_mid_tick = mid_tick;
+
+            // normalized position (note: *no* borrow of depth here)
+            let pos_qty  = hbt.position(asset); // standalone read; fine inside this scope
+            let notional = pos_qty * mid;
+            let norm_pos = if let Some(max_notional) = max_notional_cap {
+                if max_notional > 0.0 { (notional / max_notional).clamp(-1.0, 1.0) } else { 0.0 }
+            } else {
+                if max_position_qty > 0.0 { (pos_qty / max_position_qty).clamp(-1.0, 1.0) } else { 0.0 }
+            };
+
+            // depths in ticks from vol
+            let half_spread_tick = vol_tick_std * vol_to_half_spread;
+            let bid_depth_tick = half_spread_tick * (1.0 + skew * norm_pos);
+            let ask_depth_tick = half_spread_tick * (1.0 - skew * norm_pos);
+
+            // forecast mid = microprice
+            let fair = mp;
+
+            // $100 order size, rounded to lot
+            let mut oq = (order_value_usd / mid / lot_size).round();
+            if oq < 1.0 { oq = 1.0; }
+            let order_qty = oq * lot_size;
+
+            // clamp to BBO
+            let mut bid_px = (fair - bid_depth_tick * tick_size).min(bb as f64);
+            let mut ask_px = (fair + ask_depth_tick * tick_size).max(ba as f64);
+
+            // grid interval
+            let grid_interval = {
+                let raw = (half_spread_tick * tick_size) / min_grid_step;
+                (raw.round() * min_grid_step).max(min_grid_step)
+            };
+
+            // align to grid
+            if bid_px.is_finite() && grid_interval.is_finite() {
+                bid_px = (bid_px / grid_interval).floor() * grid_interval;
+            }
+            if ask_px.is_finite() && grid_interval.is_finite() {
+                ask_px = (ask_px / grid_interval).ceil() * grid_interval;
+            }
+
+            // build target grids as plain HashMaps (no borrow from hbt)
+            let mut new_bid: HashMap<u64, f64> = HashMap::new();
+            if norm_pos < 1.0 && bid_px.is_finite() {
+                let mut px = bid_px;
+                for _ in 0..grid_num {
+                    let tid = (px / tick_size).round() as u64;
+                    new_bid.insert(tid, px);
+                    px -= grid_interval;
+                }
+            }
+
+            let mut new_ask: HashMap<u64, f64> = HashMap::new();
+            if norm_pos > -1.0 && ask_px.is_finite() {
+                let mut px = ask_px;
+                for _ in 0..grid_num {
+                    let tid = (px / tick_size).round() as u64;
+                    new_ask.insert(tid, px);
+                    px += grid_interval;
+                }
+            }
+
+            (Some(new_bid), Some(new_ask), order_qty)
+        }; // <-- 'd' (and any read-only borrows) drop here
+
+        let new_bid = maybe_new_bid.unwrap();
+        let new_ask = maybe_new_ask.unwrap();
+
+        // -------- READ ORDERS (immutable), decide cancels/posts, then drop borrow --------
+        let (cancels, post_bids, post_asks) = {
+            let orders = hbt.orders(asset); // immutable borrow limited to this block
+            // cancels
+            let mut cancels: Vec<u64> = Vec::new();
+            for o in orders.values() {
+                if o.cancellable() {
+                    let keep = match o.side {
+                        Side::Buy  => new_bid.contains_key(&o.order_id),
+                        Side::Sell => new_ask.contains_key(&o.order_id),
+                        _ => true,
+                    };
+                    if !keep { cancels.push(o.order_id); }
+                }
+            }
+            // posts (only where not already working)
+            let mut post_bids: Vec<(u64, f64)> = Vec::new();
+            for (id, px) in new_bid.iter() {
+                if !orders.contains_key(id) {
+                    post_bids.push((*id, *px));
+                }
+            }
+            let mut post_asks: Vec<(u64, f64)> = Vec::new();
+            for (id, px) in new_ask.iter() {
+                if !orders.contains_key(id) {
+                    post_asks.push((*id, *px));
+                }
+            }
+            (cancels, post_bids, post_asks)
+        }; // <-- 'orders' borrow ends here
+
+        // -------- MUTATIONS (safe: no immutable borrows alive) --------
+        for id in cancels {
+            let _ = hbt.cancel(asset, id, false);
+        }
+        for (id, px) in post_bids {
+            let _ = Bot::submit_buy_order(hbt, asset, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false);
+        }
+        for (id, px) in post_asks {
+            let _ = Bot::submit_sell_order(hbt, asset, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false);
+        }
+
+        // record after updates
+        if t % record_every == 0 { recorder.record(hbt).unwrap(); }
     }
+
     Ok(())
 }
 

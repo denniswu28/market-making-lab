@@ -19,19 +19,10 @@ def main():
         default=50,
         help="Top-N alts by quote volume (when --symbols is omitted)",
     )
-    p.add_argument("--out", default="pipeline/tickers.json", help="Output JSON file")
+    p.add_argument("--out", default="pipeline/tickers_new.json", help="Output JSON file")
     args = p.parse_args()
 
-    args.symbols = [
-        "SOLUSDT",
-        "SUIUSDT",
-        "BNBUSDT",
-        "TONUSDT",
-        "WIFUSDT",
-        "WLDUSDT",
-        "1000SHIBUSDT",
-        "1000PEPEUSDT",
-    ]
+    args.symbols = ["SOLUSDC", "SUIUSDC", "BNBUSDC", "WIFUSDC", "WLDUSDC", "1000SHIBUSDC", "1000PEPEUSDC", "ORDIUSDC", "UNIUSDC", "NEOUSDC", "KAITOUSDC"]
 
     try:
         info = fetch_binance_futures_info(args.symbols, proxy=args.proxy)

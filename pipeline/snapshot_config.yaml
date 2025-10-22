@@ -1,7 +1,8 @@
 # Where your converted feeds live (same base_root used by backtest)
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
-symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+# symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+symbols: ["ONDOUSDT"]
 
 # Date or range to build snapshot from
 date_from: 20250129
@@ -28,4 +29,4 @@ initial_snapshot: "None"
 # Supply sizes directly, or via tickers.json, or let the script fetch missing ones.
 # tick_size: { SOLUSDT: 0.01 }
 # lot_size:  { SOLUSDT: 0.01 }
-tickers_json: "./ticker_8.json"
+tickers_json: "./tickers.json"

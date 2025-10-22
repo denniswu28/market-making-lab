@@ -9,15 +9,16 @@ use hftbacktest::{
         },
         recorder::BacktestRecorder,
         Backtest, ExchangeKind, L2AssetBuilder,
-    }, depth::MarketDepth, prelude::{ApplySnapshot, Bot, HashMapMarketDepth}
+    },
+    depth::MarketDepth,
+    prelude::{ApplySnapshot, Bot, HashMapMarketDepth},
 };
-use hftbacktest::depth::{INVALID_MIN, INVALID_MAX};
 use statmm::algo::{
-    grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair, grid_weighted_depth_fair, grid_glft_simplified,
-    Transform,
+    grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair, grid_weighted_depth_fair,
+    grid_glft_simplified, Transform,
 };
 use tracing_subscriber::{fmt, EnvFilter};
-use tracing::{trace, debug, info, warn, error};
+use tracing::warn;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum AlgoKind {
@@ -29,7 +30,7 @@ enum AlgoKind {
     WeightedDepth,
     /// Effective-VAMP (side-weighted prices) as fair price
     VampEffective,
-    /// GLFT-style simplified: volatility-widened half-spread + mid transform
+    /// GLFT-style simplified: microprice fair + volatility-widened half-spread
     GlftSimple,
 }
 
@@ -129,12 +130,26 @@ struct Args {
     #[arg(long)]
     target_qty_per_side: Option<f64>,
 
-    /// GLFT-simple: rolling return std window (ticks)
-    #[arg(long, default_value_t = 600_usize)]
-    glft_vol_window: usize,
-    /// GLFT-simple: additive widening coefficient (rhs_eff = rhs + vol_scale * sigma)
-    #[arg(long, default_value_t = 0.0)]
-    glft_vol_scale: f64,
+    // /// GLFT-simple: rolling return std window (in steps)
+    // #[arg(long, default_value_t = 600_usize)]
+    // glft_vol_window: usize,
+    // /// GLFT-simple: ticks-per-sigma multiplier → half-spread in ticks
+    // /// (tutorial’s `vol_to_half_spread`; effective RHS = base_rhs + (sigma_tick * tick_size / fair))
+    // #[arg(long, default_value_t = 1.0)]
+    // glft_vol_scale: f64,
+    // /// GLFT-simple: how often to refresh sigma (nanoseconds)
+    // /// (tutorial refreshes ~every 5s)
+    // #[arg(long, default_value_t = 5_000_000_000_i64)]
+    // glft_vol_refresh_ns: i64,
+
+    #[arg(long, default_value_t = 6000)]
+    glft_vol_window: usize,            // ticks; 10m @100ms = 6000
+    #[arg(long, default_value_t = 0.5)]
+    glft_vol_scale: f64,               // == vol_to_half_spread (tutorial name)
+    #[arg(long)]
+    glft_max_notional_position: Option<f64>, // fixed notional cap; optional
+    #[arg(long, default_value_t = 100.0)]
+    glft_order_usd: f64, 
 }
 
 fn prepare_backtest(
@@ -147,17 +162,15 @@ fn prepare_backtest(
     taker_fee: f64,
     queue_power: f64,
 ) -> Backtest<HashMapMarketDepth> {
+    use hftbacktest::backtest::data::read_npz_file;
     let latency_model = IntpOrderLatency::new(
-        latency_files
-            .into_iter()
-            .map(DataSource::File)
-            .collect::<Vec<_>>(),
+        latency_files.into_iter().map(DataSource::File).collect::<Vec<_>>(),
         0,
     );
     let asset_type = LinearAsset::new(1.0);
     let queue_model = ProbQueueModel::new(PowerProbQueueFunc3::new(queue_power));
 
-    let hbt = Backtest::builder()
+    Backtest::builder()
         .add_asset(
             L2AssetBuilder::new()
                 .data(
@@ -185,31 +198,25 @@ fn prepare_backtest(
                 .unwrap(),
         )
         .build()
-        .unwrap();
-    hbt
+        .unwrap()
 }
 
 fn build_transform(kind: TransformKind, window: Option<usize>, ema_alpha: Option<f64>) -> Transform {
     match kind {
         TransformKind::None => Transform::None,
-        TransformKind::Sma => Transform::SMA {
-            window: window.unwrap_or(300),
-        },
-        TransformKind::Ema => Transform::EMA {
-            alpha: ema_alpha.unwrap_or(0.1),
-        },
-        TransformKind::Zscore => Transform::ZScore {
-            window: window.unwrap_or(1800),
-        },
+        TransformKind::Sma => Transform::SMA { window: window.unwrap_or(300) },
+        TransformKind::Ema => Transform::EMA { alpha: ema_alpha.unwrap_or(0.1) },
+        TransformKind::Zscore => Transform::ZScore { window: window.unwrap_or(1800) },
     }
 }
 
 fn main() {
     let _ = fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
         .with_target(true)
         .with_level(true)
         .try_init();
+
     let args = Args::parse();
     warn!(?args, "CLI args parsed");
     let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
@@ -322,26 +329,21 @@ fn main() {
             .unwrap();
         }
         AlgoKind::GlftSimple => {
-            // For ZScore transform, alpha_scale is used as z->price multiplier; default to 0 if not set.
-            let z_k = args.alpha_scale.unwrap_or(0.0);
+            let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
             grid_glft_simplified::<HashMapMarketDepth, _, _>(
                 &mut hbt,
                 &mut recorder,
-                args.relative_half_spread,
-                args.relative_grid_interval,
-                args.grid_num,
+                args.glft_vol_scale,                 // vol_to_half_spread
                 min_grid_step,
+                args.grid_num,
                 args.skew,
-                args.order_qty,
-                args.max_position,
+                args.max_position,                   // qty cap (also used if no notional cap)
                 args.glft_vol_window,
-                args.glft_vol_scale,
-                transform,
-                z_k,
+                args.glft_order_usd,
+                args.glft_max_notional_position,     // optional notional cap
                 args.elapse_ns,
                 args.record_every,
-            )
-            .unwrap();
+            ).unwrap();
         }
     }
 

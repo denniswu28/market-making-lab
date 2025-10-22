@@ -1,13 +1,12 @@
 # Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
-# symbols: ["SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
-symbols: ["BTCUSDT"]
-
+# symbols: ["SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT", "ONDOUSDT"]
+symbols: ["SUIUSDT"]
 
 # Date range
-date_from: 20250629
-date_to:   20250831
+date_from: 20250901
+date_to:   20251001
 
 # Optional SOD snapshot (per symbol you can leave blank)
 # initial_snapshot: "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250131_EOD.npz"
@@ -19,45 +18,50 @@ date_to:   20250831
 binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
 
 # Parallelism
-num_proc: 1
+num_proc: 7
 
 # Fees / Queue model
 fees:
-  maker: 0.0000
+  maker: 0.00002
   taker:  0.0007
 queue_power: 3.0
 
 # Tick/lot fallback if not in tickers.json (symbol lookup preferred)
 defaults:
-  tick_size: 0.01
-  lot_size: 0.01
+  tick_size: 0.0001
+  lot_size: 0.1
 
 # Path to tickers.json (from your ticker.py; includes tick_size/lot_size/weighted_avg_price/min_qty)
-tickers_json: "pipeline/ticker_8.json"
+tickers_json: "pipeline/tickers.json"
 
 # backtest params
-elapse_ns: 1000000000
+elapse_ns: 100000000
 rust_log: "error" 
+rust_backtrace: 0
+record_every: 1
 
 # Grid parameters (shared)
 grid:
-  relative_half_spread: 0.0006
-  relative_grid_interval: 0.0006
-  grid_num: 1
+  relative_half_spread: 0.0000
+  relative_grid_interval: 0.0000
+  grid_num: 20
   min_grid_step_override: null  # null => use tick_size
-  skew_override: null           # null => rel_half_spread / grid_num
-  order_value_usd: 10000
-  max_position_in_grids: 50
+  skew_override: 1           # null => rel_half_spread / grid_num
+  order_value_usd: 100
+  max_position_in_grids: 10
 
 # Alpha/price model selection
 algo:
-  name: "obi-static-alpha"   # obi-static-alpha | vamp | weighted-depth | vamp-effective
+  name: "glft-simple"   # obi-static-alpha | vamp | weighted-depth | vamp-effective | glft-simple
   params:
+    alpha_scale: 0.0       # for all algos
     look_depth_pct: 0.025    # for obi-static-alpha
     normalize: true          # for obi-static-alpha
-    alpha_scale: 160.0       # for obi-static-alpha
     vamp_depth_pct: 0.02     # for vamp / vamp-effective
     target_qty_per_side: 500 # for weighted-depth
+    glft_vol_window: 6000     # rolling window (ticks) for return std
+    glft_vol_scale: 1      # widening coeff: rhs_eff = rhs + vol_scale * sigma
+    # glft_vol_refresh_ns: 5000000000 
 
 # Time-series transform
 transform:
@@ -66,4 +70,4 @@ transform:
   ema_alpha: 0.1       # for ema
 
 # Output
-out_path: "./out/test_btc"      # CSVs per symbol are written here
+out_path: "./out/test_glft_1_lighter"      # CSVs per symbol are written here

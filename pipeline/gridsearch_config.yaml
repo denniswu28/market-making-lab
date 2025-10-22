@@ -1,94 +1,91 @@
-# Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
+# --------- Data roots ---------
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
 symbols: ["SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
 
 # Date range
-date_from: 20250201
-date_to:   20250801
+date_from: 20250901
+date_to:   20251010
 
-# Optional SOD snapshot (per symbol you can leave blank)
-# initial_snapshot: "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250131_EOD.npz"
-   # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
-initial_snapshot:
-  "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
+# Optional SOD/EOD snapshot. Use template or per-symbol map.
+# initial_snapshot:
+#   "*": "{base_root}/data/{exchange}/{symbol}/{symbol}_{date}_EOD.npz"
 
-# Path to compiled Rust binary (relative to repo root is fine)
+# --------- Runner binary ---------
 binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
 
-# Parallelism
-num_proc: 7
+# --------- Parallelism ---------
+num_proc: 6
 
-# Fees / Queue model
+# --------- Fees / Queue model ---------
 fees:
-  maker: 0.0000
-  taker:  0.0007
+  maker: 0.00002
+  taker: 0.0007
 queue_power: 3.0
 
-# Tick/lot fallback if not in tickers.json (symbol lookup preferred)
+# --------- Fallback tick/lot ---------
 defaults:
   tick_size: 0.01
   lot_size: 0.01
 
-# Path to tickers.json (from your ticker.py; includes tick_size/lot_size/weighted_avg_price/min_qty)
-tickers_json: "pipeline/ticker_8.json"
+# --------- Tickers (tick/lot/WAP/min_qty) ---------
+tickers_json: "/home/wtr2/statmm/pipeline/tickers.json"
 
-# backtest params
-elapse_ns: 100000000
-rust_log: "error" 
+# --------- Backtest timing ---------
+elapse_ns: 100000000       # 100ms
+record_every: 10           # record every 1s
+rust_log: "error"
 
-# Grid parameters (shared)
+# --------- Grid (shared) ---------
 grid:
-  relative_half_spread: 0.0005
-  relative_grid_interval: 0.0005
+  relative_half_spread: 0.0          # unused by GLFT but kept for CLI compatibility
+  relative_grid_interval: 0.0        # unused by GLFT; interval is tied to vol-based half-spread
   grid_num: 20
-  min_grid_step_override: null  # null => use tick_size
-  skew_override: null           # null => rel_half_spread / grid_num
-  order_value_usd: 100
-  max_position_in_grids: 10
+  min_grid_step_override: null       # null => use tick_size
+  skew_override: null            
+  order_value_usd: 100               # GLFT: dynamic $-anchored order sizing
+  max_position_in_grids: 10          # used for non-GLFT; GLFT can use notional cap below
 
-# Alpha/price model selection
+# --------- Algo selection ---------
 algo:
-  name: "obi-static-alpha"   # obi-static-alpha | vamp | weighted-depth | vamp-effective
+  name: "glft-simple"
   params:
-    look_depth_pct: 0.025    # for obi-static-alpha
-    normalize: true          # for obi-static-alpha
-    alpha_scale: 0.0       # for obi-static-alpha
-    vamp_depth_pct: 0.02     # for vamp / vamp-effective
-    target_qty_per_side: 500 # for weighted-depth
+    glft_vol_window: 6000           # ~10 minutes at 100ms
+    glft_vol_scale: 10              # ticks-per-sigma multiplier
 
-# Time-series transform
+# --------- Transform (kept for API parity; GLFT uses microprice) ---------
 transform:
-  kind: "zscore"       # none | sma | ema | zscore
-  window: 3600         # for sma/zscore
-  ema_alpha: 0.1       # for ema
+  kind: "none"          # "none" | "sma" | "ema" | "zscore"
+  # window: 3600        # for sma/zscore
+  # ema_alpha: 0.1      # for ema
 
-# Output
-out_path: "./out/gridsearch_new"      # CSVs per symbol are written here
+# --------- Output ---------
+out_path: "./out/gridsearch_glft_simple"
 
-
+# --------- Gridsearch sweeps ---------
 gridsearch:
-  # sweep these:
-  rel_half_spread: [00.0005, 0.001, 0.002]
-  grid_num: [10, 20, 30]
+  # Static grid fields — irrelevant for GLFT but retained for API uniformity
+  rel_half_spread: [0.0]
+  grid_num: [10, 20]
   relative_grid_interval: "same"
 
-  # how to compute skew:
-  skew_mode: "rel_over_grid_num"      # or "fixed"
-  # skew_fixed_value: 0.00005    # used only when skew_mode == "fixed"
+  # "fixed" or "rel_over_n" (also accepts "rel_over_grid_num" synonym)
+  skew_mode: "fixed"
+  skew_fixed_value: [0.5, 1.0]
 
-  # how to compute max_position:
-  max_position_mode: "equal_to_grid_num"   # or "equal_to_grid_num"
+  # Max position: leave as-is or tie to grid_num
+  max_position_mode: "as_in_config"   # or "equal_to_grid_num"
 
-  # transform:
-  #   kind: ["zscore", "ema", "none"]  # any of: none | sma | ema | zscore
-  #   window: [1800, 3600]             # used for sma/zscore kinds
-  #   ema_alpha: [0.05, 0.1]           # used for ema kind
-
-  # optional: sweep a model knob (example for obi-static-alpha)
+  # Algo param sweeps (this is what matters for GLFT)
   algo_params:
-    alpha_scale: [0.0]
-    look_depth_pct: [0.0001]
+    glft_vol_scale: [1, 2, 3, 5, 10, 15]
+    # glft_vol_refresh_ns: [2000000000, 5000000000]
+    # max_notional_cap: [1500, 2500, 5000]
 
-  # skip runs if CSV already exists
+  # Optional transform sweeps (generally "none" for GLFT)
+  # transform:
+  #   kind: ["none", "zscore"]
+  #   window: [1800, 3600]
+  #   ema_alpha: [0.05, 0.1]
+
   skip_existing: false

@@ -1,4 +1,3 @@
-# pipeline/4_backtest.py
 from __future__ import annotations
 import argparse
 import json
@@ -115,7 +114,7 @@ def _build_cmd(
 
     # algo extras
     algo_name = algo_cfg["name"].lower()
-    p = algo_cfg.get("params", {})
+    p = algo_cfg.get("params", {}) or {}
     if algo_name == "obi-static-alpha":
         args += [
             "--look-depth-pct", str(p.get("look_depth_pct", 0.02)),
@@ -127,6 +126,13 @@ def _build_cmd(
         args += ["--vamp-depth-pct", str(p.get("vamp_depth_pct", 0.02))]
     elif algo_name == "weighted-depth":
         args += ["--target-qty-per-side", str(p.get("target_qty_per_side", 500.0))]
+    elif algo_name == "glft-simple":
+        # Only pass the flags your binary actually supports.
+        args += [
+            "--glft-vol-window", str(int(p.get("glft_vol_window", 6000))),
+            "--glft-vol-scale",  str(p.get("glft_vol_scale", 0.5)),
+        ]
+        # Do NOT pass --order-value-usd or any other GLFT options if the binary doesn't expose them.
     else:
         raise ValueError(f"Unsupported algo: {algo_name}")
 
@@ -149,7 +155,7 @@ def _symbol_params(symbol: str, tickers: Dict[str, Any], cfg: Dict[str, Any]) ->
     min_qty   = float(info.get("min_qty", lot_size))
 
     grid = cfg["grid"].copy()
-    # order qty ~ fixed USD notion
+    # order qty ~ fixed USD notion (no CLI flag; we compute qty here)
     px = 1000.0 * wap if symbol.startswith("1000") else wap
     order_qty100       = round((grid["order_value_usd"] / px) / lot_size) * lot_size
     grid["order_qty"]  = max(min_qty, order_qty100)
