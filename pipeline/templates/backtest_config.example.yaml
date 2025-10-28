@@ -1,10 +1,10 @@
 # Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
-symbols: ["SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+symbols: ["BNBUSDT", "SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
 
 # Date range
-date_from: 20250401
+date_from: 20250201
 date_to:   20250801
 
 # Optional SOD snapshot (per symbol you can leave blank)
@@ -53,7 +53,7 @@ algo:
   params:
     look_depth_pct: 0.025    # for obi-static-alpha
     normalize: true          # for obi-static-alpha
-    alpha_scale: 0.0       # for obi-static-alpha
+    alpha_scale: 100.0       # for obi-static-alpha
     vamp_depth_pct: 0.02     # for vamp / vamp-effective
     target_qty_per_side: 500 # for weighted-depth
 
@@ -64,4 +64,4 @@ transform:
   ema_alpha: 0.1       # for ema
 
 # Output
-out_path: "./out/test_3"      # CSVs per symbol are written here
+out_path: "./out/test_bnb"      # CSVs per symbol are written here

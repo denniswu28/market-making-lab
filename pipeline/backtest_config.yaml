@@ -2,17 +2,17 @@
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
 # symbols: ["SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT", "ONDOUSDT"]
-symbols: ["SUIUSDT"]
+symbols: ["1000PEPEUSDT"]
 
 # Date range
-date_from: 20250901
+date_from: 20250201
 date_to:   20251001
 
 # Optional SOD snapshot (per symbol you can leave blank)
 # initial_snapshot: "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250131_EOD.npz"
    # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
-# initial_snapshot:
-#   "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
+initial_snapshot:
+  "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
 
 # Path to compiled Rust binary (relative to repo root is fine)
 binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
@@ -28,8 +28,8 @@ queue_power: 3.0
 
 # Tick/lot fallback if not in tickers.json (symbol lookup preferred)
 defaults:
-  tick_size: 0.0001
-  lot_size: 0.1
+  tick_size: 0.0000001
+  lot_size: 1
 
 # Path to tickers.json (from your ticker.py; includes tick_size/lot_size/weighted_avg_price/min_qty)
 tickers_json: "pipeline/tickers.json"
@@ -44,9 +44,9 @@ record_every: 1
 grid:
   relative_half_spread: 0.0000
   relative_grid_interval: 0.0000
-  grid_num: 20
+  grid_num: 10
   min_grid_step_override: null  # null => use tick_size
-  skew_override: 1           # null => rel_half_spread / grid_num
+  skew_override: 0.5           # null => rel_half_spread / grid_num
   order_value_usd: 100
   max_position_in_grids: 10
 
@@ -60,7 +60,7 @@ algo:
     vamp_depth_pct: 0.02     # for vamp / vamp-effective
     target_qty_per_side: 500 # for weighted-depth
     glft_vol_window: 6000     # rolling window (ticks) for return std
-    glft_vol_scale: 1      # widening coeff: rhs_eff = rhs + vol_scale * sigma
+    glft_vol_scale: 10      # widening coeff: rhs_eff = rhs + vol_scale * sigma
     # glft_vol_refresh_ns: 5000000000 
 
 # Time-series transform
@@ -70,4 +70,4 @@ transform:
   ema_alpha: 0.1       # for ema
 
 # Output
-out_path: "./out/test_glft_1_lighter"      # CSVs per symbol are written here
+out_path: "./out/test_glft_PEPE"      # CSVs per symbol are written here

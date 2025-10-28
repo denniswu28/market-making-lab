@@ -156,7 +156,7 @@ def _symbol_params(symbol: str, tickers: Dict[str, Any], cfg: Dict[str, Any]) ->
 
     grid = cfg["grid"].copy()
     # order qty ~ fixed USD notion (no CLI flag; we compute qty here)
-    px = 1000.0 * wap if symbol.startswith("1000") else wap
+    px = wap
     order_qty100       = round((grid["order_value_usd"] / px) / lot_size) * lot_size
     grid["order_qty"]  = max(min_qty, order_qty100)
     grid["max_position"] = grid["max_position_in_grids"] * grid["order_qty"]

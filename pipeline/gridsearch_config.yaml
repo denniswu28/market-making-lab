@@ -1,15 +1,15 @@
 # --------- Data roots ---------
 base_root: "/data/tmp/tardis_bn_hft"
 exchange: "binance-futures"
-symbols: ["SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
+symbols: ["1000PEPEUSDT"]
 
 # Date range
-date_from: 20250901
-date_to:   20251010
+date_from: 20250201
+date_to:   20251008
 
 # Optional SOD/EOD snapshot. Use template or per-symbol map.
-# initial_snapshot:
-#   "*": "{base_root}/data/{exchange}/{symbol}/{symbol}_{date}_EOD.npz"
+initial_snapshot:
+  "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
 
 # --------- Runner binary ---------
 binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
@@ -25,8 +25,8 @@ queue_power: 3.0
 
 # --------- Fallback tick/lot ---------
 defaults:
-  tick_size: 0.01
-  lot_size: 0.01
+  tick_size: 0.0000001
+  lot_size: 1
 
 # --------- Tickers (tick/lot/WAP/min_qty) ---------
 tickers_json: "/home/wtr2/statmm/pipeline/tickers.json"
@@ -60,25 +60,25 @@ transform:
   # ema_alpha: 0.1      # for ema
 
 # --------- Output ---------
-out_path: "./out/gridsearch_glft_simple"
+out_path: "./out/gridsearch_glft_simple_PEPE"
 
 # --------- Gridsearch sweeps ---------
 gridsearch:
   # Static grid fields — irrelevant for GLFT but retained for API uniformity
   rel_half_spread: [0.0]
-  grid_num: [10, 20]
+  grid_num: [5, 10]
   relative_grid_interval: "same"
 
   # "fixed" or "rel_over_n" (also accepts "rel_over_grid_num" synonym)
   skew_mode: "fixed"
-  skew_fixed_value: [0.5, 1.0]
+  skew_fixed_value: [0.3, 0.5, 1.0]
 
   # Max position: leave as-is or tie to grid_num
   max_position_mode: "as_in_config"   # or "equal_to_grid_num"
 
   # Algo param sweeps (this is what matters for GLFT)
   algo_params:
-    glft_vol_scale: [1, 2, 3, 5, 10, 15]
+    glft_vol_scale: [5, 10, 15]
     # glft_vol_refresh_ns: [2000000000, 5000000000]
     # max_notional_cap: [1500, 2500, 5000]
 

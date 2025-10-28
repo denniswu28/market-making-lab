@@ -249,7 +249,7 @@ def _symbol_base_grid(symbol: str, tickers: Dict[str, Any], cfg: Dict[str, Any])
     min_qty = float(info.get("min_qty", lot_size))
 
     g = cfg["grid"].copy()
-    px = 1000.0 * wap if symbol.startswith("1000") else wap
+    px = wap
     order_qty100 = round((g["order_value_usd"] / px) / lot_size) * lot_size
     g["order_qty"] = max(min_qty, order_qty100)
     g["max_position"] = g["max_position_in_grids"] * g["order_qty"]
