@@ -1,35 +1,16 @@
-# Where the order feed NPZ files live (output of your converter)
-feeds_root: "/data/tmp/tardis_bn_hft/data"
-
-# Where to write latency NPZ files
-latency_root: "/data/tmp/tardis_bn_hft/latency"
-
-# Universe
+# Optional user-supplied real-data path.
+feeds_root: "./out/user_supplied/data"
+latency_root: "./out/user_supplied/latency"
 exchange: "binance-futures"
-
-symbol: "SOLUSDT"
-# symbols: ["SOLUSDT", "BTCUSDT"]
-
-# Dates: choose one style
-dates: ["2024-05-01", "2024-05-02"]
-
-# date_from: "2024-05-01"
-# date_to:   "2024-05-31"
-
-# Polars dynamic grouping bucket on integer timestamps
-# NOTE: If your 'local_ts' is in microseconds, use '1000000i' for 1-second buckets.
-bucket_every: "1000000i"  # default (as in sample)
-
-# Latency synthesis parameters (order latency = mul * feed_latency + offset)
+symbol: "SYNTHUSDT"
+dates: ["2025-01-01"]
+bucket_every: "1000000i"
 mul_entry: 4
 mul_resp: 3
 offset_entry: 0
 offset_resp: 0
-
-# Output layout/naming
-include_symbol_dir: true              # /latency_root/{exchange}/{symbol}/...
-filename_template: "latency_{date}.npz"  # {date} -> YYYYMMDD
+include_symbol_dir: true
+filename_template: "latency_{date}.npz"
 overwrite: true
-
-# Parallelism
-num_proc: 4
+num_proc: 1
+delete_inputs_after: false

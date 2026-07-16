@@ -1,36 +1,18 @@
-# Where your parquet lives
-data_root: "/data/uni/crypto/parquet_tardis"
-
-# Where to write npz/npy
-output_root: "/data/tmp/tardis_bn_hft/data"
-
-tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
+# Optional user-supplied real-data path.
+# Provide your own Tardis-style parquet inputs under your vendor terms.
+data_root: "./user_data/parquet_tardis"
+output_root: "./out/user_supplied/data"
+tmp_root: "./out/user_supplied/.tmp"
 keep_temps: false
-
-# Exchange & instruments
-exchange: "binance-futures"           # or "okex-swap"
-symbols: ["SOLUSDT"]
-
-# Dates to convert (either format is fine)
-dates: ["2025-01-29", "2025-01-30", "2025-01-31", "2025-02-01", "2025-02-02"]
-
-# Snapshot handling
-#   auto: process SOD on sod_date, ignore_sod otherwise
-#   process | ignore_sod | ignore to force same mode for all days
+exchange: "binance-futures"
+symbols: ["SYNTHUSDT"]
+dates: ["2025-01-01"]
 snapshot_mode: "process"
-sod_date: "2025-01-29"                # first backtest date
-
-# Use quotes/BBO ("book_ticker") to fuse with depth+trades
+sod_date: "2025-01-01"
 use_quotes: false
-
-# hftbacktest conversion knobs
-num_proc: 5
+num_proc: 1
 buffer_size: 200000000
 ss_buffer_size: 2000000
 base_latency: 0.0
-
-# Output format
-output_format: "npz"                  # or "npy"
-
-# Dangerous: delete raw input files after successful conversion
+output_format: "npz"
 delete_inputs_after: false

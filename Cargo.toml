@@ -2,6 +2,8 @@
 name = "statmm"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+rust-version = "1.89"
 
 [lib]
 name = "statmm"
@@ -13,13 +15,12 @@ path = "src/main.rs"
 
 [dependencies]
 clap = {version = "4.5.47", features = ["derive"] }
-hftbacktest = { path = "../hftbacktest/hftbacktest" }
+hftbacktest = { git = "https://github.com/nkaz001/hftbacktest.git", rev = "6557e564ac984c46405a0ddfd08272f5009abc2e", default-features = false, features = ["backtest"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [[example]]
 name = "gridtrading_backtest"
 path = "examples/gridtrading_backtest.rs"
-
 
 
