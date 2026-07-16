@@ -1,7 +1,18 @@
-use std::collections::HashMap;
+#![allow(
+    clippy::doc_overindented_list_items,
+    clippy::empty_line_after_doc_comments,
+    clippy::let_and_return,
+    clippy::manual_is_multiple_of,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_cast,
+    clippy::upper_case_acronyms
+)]
+
+use hftbacktest::depth::{INVALID_MAX, INVALID_MIN};
 use hftbacktest::prelude::*;
-use hftbacktest::depth::{INVALID_MIN, INVALID_MAX};
-use tracing::{trace, debug, info, warn, error};
+use std::collections::HashMap;
+use tracing::{debug, trace};
 /// ---------------------------
 /// Rolling utilities
 /// ---------------------------
@@ -15,10 +26,18 @@ struct RollingSMA {
 }
 impl RollingSMA {
     fn new(n: usize) -> Self {
-        Self { n, buf: vec![0.0; n.max(1)], head: 0, len: 0, sum: 0.0 }
+        Self {
+            n,
+            buf: vec![0.0; n.max(1)],
+            head: 0,
+            len: 0,
+            sum: 0.0,
+        }
     }
     fn update(&mut self, x: f64) -> f64 {
-        if self.n == 0 { return x; }
+        if self.n == 0 {
+            return x;
+        }
         if self.len < self.n {
             self.buf[self.head] = x;
             self.sum += x;
@@ -46,10 +65,20 @@ struct RollingZ {
 }
 impl RollingZ {
     fn new(n: usize) -> Self {
-        Self { n, buf: vec![0.0; n.max(1)], head: 0, len: 0, sum: 0.0, sum2: 0.0, eps: 1e-12 }
+        Self {
+            n,
+            buf: vec![0.0; n.max(1)],
+            head: 0,
+            len: 0,
+            sum: 0.0,
+            sum2: 0.0,
+            eps: 1e-12,
+        }
     }
     fn update(&mut self, x: f64) -> f64 {
-        if self.n == 0 { return 0.0; }
+        if self.n == 0 {
+            return 0.0;
+        }
         if self.len < self.n {
             self.buf[self.head] = x;
             self.sum += x;
@@ -77,10 +106,20 @@ struct RollingEMA {
     v: f64,
 }
 impl RollingEMA {
-    fn new(alpha: f64) -> Self { Self { alpha, has: false, v: 0.0 } }
+    fn new(alpha: f64) -> Self {
+        Self {
+            alpha,
+            has: false,
+            v: 0.0,
+        }
+    }
     fn update(&mut self, x: f64) -> f64 {
-        if !self.has { self.v = x; self.has = true; }
-        else { self.v = self.alpha * x + (1.0 - self.alpha) * self.v; }
+        if !self.has {
+            self.v = x;
+            self.has = true;
+        } else {
+            self.v = self.alpha * x + (1.0 - self.alpha) * self.v;
+        }
         self.v
     }
 }
@@ -96,31 +135,39 @@ struct RollingStd {
 }
 impl RollingStd {
     fn new(n: usize) -> Self {
-        Self { n: n.max(1), buf: vec![0.0; n.max(1)], head: 0, len: 0, sum: 0.0, sum2: 0.0 }
+        Self {
+            n: n.max(1),
+            buf: vec![0.0; n.max(1)],
+            head: 0,
+            len: 0,
+            sum: 0.0,
+            sum2: 0.0,
+        }
     }
     fn push(&mut self, x: f64) {
         if self.len < self.n {
             self.buf[self.head] = x;
-            self.sum  += x;
+            self.sum += x;
             self.sum2 += x * x;
             self.head = (self.head + 1) % self.n;
-            self.len  += 1;
+            self.len += 1;
         } else {
             let old = self.buf[self.head];
             self.buf[self.head] = x;
-            self.sum  += x - old;
+            self.sum += x - old;
             self.sum2 += x * x - old * old;
             self.head = (self.head + 1) % self.n;
         }
     }
     fn std(&self) -> f64 {
-        if self.len == 0 { return f64::NAN; }
+        if self.len == 0 {
+            return f64::NAN;
+        }
         let m = self.sum / self.len as f64;
-        let v = (self.sum2 / self.len as f64) - m*m;
+        let v = (self.sum2 / self.len as f64) - m * m;
         v.max(0.0).sqrt()
     }
 }
-
 
 /// Time-series transform selection (applied to alpha OR price depending on algo)
 pub enum Transform {
@@ -151,7 +198,7 @@ impl TransformState {
             TransformState::None => x,
             TransformState::SMA(s) => s.update(x),
             TransformState::EMA(e) => e.update(x),
-            TransformState::Z(z)   => z.update(x),
+            TransformState::Z(z) => z.update(x),
         }
     }
 }
@@ -160,13 +207,11 @@ impl TransformState {
 /// Depth helpers
 /// ---------------------------
 
-fn clamp_ticks(lb: i64, ub: i64, t: i64) -> i64 {
-    t.max(lb).min(ub)
-}
-
 /// Sum qty from best ask upward to (inclusive) up_to_tick.
 fn sum_ask_qty_up_to<MD: MarketDepth>(depth: &MD, best_ask_tick: i64, up_to_tick: i64) -> f64 {
-    if best_ask_tick == INVALID_MAX || up_to_tick < best_ask_tick { return 0.0; }
+    if best_ask_tick == INVALID_MAX || up_to_tick < best_ask_tick {
+        return 0.0;
+    }
     let mut s = 0.0;
     let mut t = best_ask_tick;
     while t <= up_to_tick {
@@ -178,7 +223,9 @@ fn sum_ask_qty_up_to<MD: MarketDepth>(depth: &MD, best_ask_tick: i64, up_to_tick
 
 /// Sum qty from best bid downward to (inclusive) down_to_tick.
 fn sum_bid_qty_down_to<MD: MarketDepth>(depth: &MD, best_bid_tick: i64, down_to_tick: i64) -> f64 {
-    if best_bid_tick == INVALID_MIN || down_to_tick > best_bid_tick { return 0.0; }
+    if best_bid_tick == INVALID_MIN || down_to_tick > best_bid_tick {
+        return 0.0;
+    }
     let mut s = 0.0;
     let mut t = best_bid_tick;
     while t >= down_to_tick {
@@ -196,10 +243,12 @@ fn collect_levels_by_percent<MD: MarketDepth>(
     let ts = depth.tick_size() as f64;
     let bb = depth.best_bid();
     let ba = depth.best_ask();
-    if bb.is_nan() || ba.is_nan() { return (vec![], vec![]); }
+    if bb.is_nan() || ba.is_nan() {
+        return (vec![], vec![]);
+    }
     let mid = 0.5 * (bb + ba);
     let bid_floor_tick = ((mid * (1.0 - pct)) / ts).floor() as i64;
-    let ask_ceil_tick  = ((mid * (1.0 + pct)) / ts).ceil() as i64;
+    let ask_ceil_tick = ((mid * (1.0 + pct)) / ts).ceil() as i64;
 
     let mut bids = Vec::new();
     let mut t = depth.best_bid_tick();
@@ -223,11 +272,7 @@ fn collect_levels_by_percent<MD: MarketDepth>(
 }
 
 /// Collect side until target_qty is reached (allow partial on boundary).
-fn collect_side_until_qty<MD: MarketDepth>(
-    depth: &MD,
-    side: Side,
-    target_qty: f64,
-) -> (f64, f64) {
+fn collect_side_until_qty<MD: MarketDepth>(depth: &MD, side: Side, target_qty: f64) -> (f64, f64) {
     let ts = depth.tick_size() as f64;
     let mut acc_px_qty = 0.0;
     let mut acc_qty = 0.0;
@@ -291,8 +336,6 @@ where
     if depth.best_bid_tick() == INVALID_MIN || depth.best_ask_tick() == INVALID_MAX {
         return Ok(()); // no BBO yet
     }
-    let mid = 0.5 * (depth.best_bid() + depth.best_ask()) as f64;
-
     // inventory skew in *relative* space; match template
     let normalized_position = position / order_qty;
     let rel_bid_depth = relative_half_spread + skew * normalized_position;
@@ -321,9 +364,8 @@ where
         "grid update inputs"
     );
 
-
     hbt.clear_inactive_orders(Some(0));
-    
+
     // BUY side
     {
         let orders = hbt.orders(0);
@@ -337,21 +379,36 @@ where
         }
         let cancels: Vec<u64> = orders
             .values()
-            .filter(|o| o.side == Side::Buy && o.cancellable() && !new_bid.contains_key(&o.order_id))
+            .filter(|o| {
+                o.side == Side::Buy && o.cancellable() && !new_bid.contains_key(&o.order_id)
+            })
             .map(|o| o.order_id)
             .collect();
         let posts: Vec<(u64, f64)> = new_bid
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
-        for id in cancels { 
-            debug!(side="buy", order_id=id, "cancel BUY");
-            let _ = hbt.cancel(0, id, false); 
+        for id in cancels {
+            debug!(side = "buy", order_id = id, "cancel BUY");
+            let _ = hbt.cancel(0, id, false);
         }
         for (id, px) in posts {
-            debug!(side="buy", order_id=id, price=px, qty=tick_order_qty, "post BUY");
+            debug!(
+                side = "buy",
+                order_id = id,
+                price = px,
+                qty = tick_order_qty,
+                "post BUY"
+            );
             let _ = hftbacktest::prelude::Bot::submit_buy_order(
-                hbt, 0, id, px, tick_order_qty, TimeInForce::GTX, OrdType::Limit, false
+                hbt,
+                0,
+                id,
+                px,
+                tick_order_qty,
+                TimeInForce::GTX,
+                OrdType::Limit,
+                false,
             );
         }
     }
@@ -368,7 +425,9 @@ where
         }
         let cancels: Vec<u64> = orders
             .values()
-            .filter(|o| o.side == Side::Sell && o.cancellable() && !new_ask.contains_key(&o.order_id))
+            .filter(|o| {
+                o.side == Side::Sell && o.cancellable() && !new_ask.contains_key(&o.order_id)
+            })
             .map(|o| o.order_id)
             .collect();
         let posts: Vec<(u64, f64)> = new_ask
@@ -376,13 +435,26 @@ where
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
         for id in cancels {
-            debug!(side="sell", order_id=id, "cancel SELL");
-            let _ = hbt.cancel(0, id, false); 
+            debug!(side = "sell", order_id = id, "cancel SELL");
+            let _ = hbt.cancel(0, id, false);
         }
         for (id, px) in posts {
-            debug!(side="sell", order_id=id, price=px, qty=tick_order_qty, "post SELL");
+            debug!(
+                side = "sell",
+                order_id = id,
+                price = px,
+                qty = tick_order_qty,
+                "post SELL"
+            );
             let _ = hftbacktest::prelude::Bot::submit_sell_order(
-                hbt, 0, id, px, tick_order_qty, TimeInForce::GTX, OrdType::Limit, false
+                hbt,
+                0,
+                id,
+                px,
+                tick_order_qty,
+                TimeInForce::GTX,
+                OrdType::Limit,
+                false,
             );
         }
     }
@@ -396,7 +468,7 @@ fn run_loop<I, R, MD, F>(
     elapse_ns: i64,
     record_every: usize,
     mut fair_price_fn: F,
-    quote_args: (&f64, &f64, &usize, &f64, &f64, &f64, &f64)
+    quote_args: (&f64, &f64, &usize, &f64, &f64, &f64, &f64),
 ) -> Result<(), i64>
 where
     MD: MarketDepth,
@@ -410,8 +482,10 @@ where
     let mut k = 0usize;
     while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
         k += 1;
-        trace!(k=k,ts=hbt.current_timestamp(),"loop");
-        if k % record_every == 0 { recorder.record(hbt).unwrap(); }
+        trace!(k = k, ts = hbt.current_timestamp(), "loop");
+        if k % record_every == 0 {
+            recorder.record(hbt).unwrap();
+        }
         let forecast_mid = fair_price_fn(hbt);
         update_grid::<I, MD>(
             hbt,
@@ -421,7 +495,7 @@ where
             *min_step,
             *skew,
             *order_qty,
-           *max_pos_qty,
+            *max_pos_qty,
             *grid_num,
         )?;
     }
@@ -443,11 +517,11 @@ pub fn grid_obi_static_alpha<MD, I, R>(
     order_qty: f64,
     max_position_qty: f64,
     // --- alpha knobs ---
-    look_depth_pct: f64,        // e.g. 0.025 => +/-2.5%
-    normalize: bool,            // true => (B-A)/(B+A), false => (B-A)
-    alpha_scale: f64,           // c1 in your notebook
-    ts_transform: Transform,    // e.g. ZScore{window:3600}, SMA{..}, EMA{..}, None
-    elapse_ns: i64,             // step
+    look_depth_pct: f64,     // e.g. 0.025 => +/-2.5%
+    normalize: bool,         // true => (B-A)/(B+A), false => (B-A)
+    alpha_scale: f64,        // c1 in your notebook
+    ts_transform: Transform, // e.g. ZScore{window:3600}, SMA{..}, EMA{..}, None
+    elapse_ns: i64,          // step
     record_every: usize,
 ) -> Result<(), i64>
 where
@@ -467,17 +541,19 @@ where
             let d = bot.depth(0);
             let bb = d.best_bid();
             let ba = d.best_ask();
-            if bb.is_nan() || ba.is_nan() { 
+            if bb.is_nan() || ba.is_nan() {
                 trace!("no BBO yet; skipping");
-                return f64::NAN; 
+                return f64::NAN;
             }
             let mid = 0.5 * (bb + ba) as f64;
-            trace!(best_bid=bb, best_ask=ba, mid, "BBO");
+            trace!(best_bid = bb, best_ask = ba, mid, "BBO");
             // compute static OBI within +/- look_depth_pct of mid
             let ts = d.tick_size() as f64;
             let best_bid_tick = d.best_bid_tick();
             let best_ask_tick = d.best_ask_tick();
-            if best_bid_tick == INVALID_MIN || best_ask_tick == INVALID_MAX { return mid; }
+            if best_bid_tick == INVALID_MIN || best_ask_tick == INVALID_MAX {
+                return mid;
+            }
             let low_tick = ((mid * (1.0 - look_depth_pct)) / ts).floor() as i64;
             let high_tick = ((mid * (1.0 + look_depth_pct)) / ts).ceil() as i64;
 
@@ -487,7 +563,9 @@ where
             let alpha = if normalize {
                 let denom = (sum_bid + sum_ask).max(1e-12);
                 raw / denom
-            } else { raw };
+            } else {
+                raw
+            };
 
             let alpha_std = tf.apply(alpha);
             let fair = mid + alpha_scale * alpha_std;
@@ -543,12 +621,16 @@ where
             let d = bot.depth(0);
             let bb = d.best_bid();
             let ba = d.best_ask();
-            if bb.is_nan() || ba.is_nan() { return f64::NAN; }
+            if bb.is_nan() || ba.is_nan() {
+                return f64::NAN;
+            }
             let mid = 0.5 * (bb + ba) as f64;
 
             let (bids, asks) = collect_levels_by_percent(d, depth_pct);
             let k = bids.len().min(asks.len());
-            if k == 0 { return mid; }
+            if k == 0 {
+                return mid;
+            }
 
             let mut num = 0.0;
             let mut den = 0.0;
@@ -622,13 +704,19 @@ where
             let d = bot.depth(0);
             let bb = d.best_bid();
             let ba = d.best_ask();
-            if bb.is_nan() || ba.is_nan() { return f64::NAN; }
+            if bb.is_nan() || ba.is_nan() {
+                return f64::NAN;
+            }
             let mid = 0.5 * (bb + ba) as f64;
 
-            let (sum_pbqb, sum_qb) = collect_side_until_qty(d, Side::Buy,  target_qty_per_side);
+            let (sum_pbqb, sum_qb) = collect_side_until_qty(d, Side::Buy, target_qty_per_side);
             let (sum_paqa, sum_qa) = collect_side_until_qty(d, Side::Sell, target_qty_per_side);
             let den = sum_qb + sum_qa;
-            let wdp = if den > 0.0 { (sum_pbqb + sum_paqa) / den } else { mid };
+            let wdp = if den > 0.0 {
+                (sum_pbqb + sum_paqa) / den
+            } else {
+                mid
+            };
 
             let fair = match price_transform {
                 Transform::ZScore { .. } => {
@@ -689,17 +777,27 @@ where
             let d = bot.depth(0);
             let bb = d.best_bid();
             let ba = d.best_ask();
-            if bb.is_nan() || ba.is_nan() { return f64::NAN; }
+            if bb.is_nan() || ba.is_nan() {
+                return f64::NAN;
+            }
             let mid = 0.5 * (bb + ba) as f64;
 
             // within pct band, compute effective side prices
             let (bids, asks) = collect_levels_by_percent(d, depth_pct);
             let (mut sum_pbqb, mut sum_qb) = (0.0, 0.0);
-            for (pb, qb) in &bids { sum_pbqb += pb * qb; sum_qb += qb; }
+            for (pb, qb) in &bids {
+                sum_pbqb += pb * qb;
+                sum_qb += qb;
+            }
             let (mut sum_paqa, mut sum_qa) = (0.0, 0.0);
-            for (pa, qa) in &asks { sum_paqa += pa * qa; sum_qa += qa; }
+            for (pa, qa) in &asks {
+                sum_paqa += pa * qa;
+                sum_qa += qa;
+            }
 
-            if sum_qb <= 0.0 || sum_qa <= 0.0 { return mid; }
+            if sum_qb <= 0.0 || sum_qa <= 0.0 {
+                return mid;
+            }
             let p_eff_bid = sum_pbqb / sum_qb;
             let p_eff_ask = sum_paqa / sum_qa;
 
@@ -853,24 +951,23 @@ where
 //     Ok(())
 // }
 
-
 #[allow(clippy::too_many_arguments)]
 pub fn grid_glft_simplified<MD, I, R>(
     hbt: &mut I,
     recorder: &mut R,
     // tutorial parameters
-    vol_to_half_spread: f64,    // "vol_to_half_spread" (scale)
-    min_grid_step: f64,         // price units
+    vol_to_half_spread: f64, // "vol_to_half_spread" (scale)
+    min_grid_step: f64,      // price units
     grid_num: usize,
     skew: f64,
-    max_position_qty: f64,      // hard position cap in *qty*
+    max_position_qty: f64, // hard position cap in *qty*
     // implementation knobs
-    vol_window_ticks: usize,    // typically 6000 for 10 minutes @100ms
-    order_value_usd: f64,       // $100 in the tutorial
+    vol_window_ticks: usize,       // typically 6000 for 10 minutes @100ms
+    order_value_usd: f64,          // $100 in the tutorial
     max_notional_cap: Option<f64>, // optional fixed notional cap; if None use qty cap
     // time control
-    elapse_ns: i64,             // 100_000_000 in tutorial (100ms)
-    record_every: usize,        // 10 in tutorial (record every 1s)
+    elapse_ns: i64,      // 100_000_000 in tutorial (100ms)
+    record_every: usize, // 10 in tutorial (record every 1s)
 ) -> Result<(), i64>
 where
     MD: MarketDepth,
@@ -881,7 +978,7 @@ where
 {
     let asset = 0usize;
     let tick_size = hbt.depth(asset).tick_size() as f64;
-    let lot_size  = hbt.depth(asset).lot_size()  as f64;
+    let lot_size = hbt.depth(asset).lot_size() as f64;
 
     // tutorial updates vol every 5s → derive from elapse_ns
     let five_sec = 5_000_000_000_i64;
@@ -889,7 +986,7 @@ where
 
     let mut t: usize = 0;
     let mut prev_mid_tick: f64 = f64::NAN;
-    let mut vol_tick_std: f64  = f64::NAN; // std of mid_tick change * sqrt(10)
+    let mut vol_tick_std: f64 = f64::NAN; // std of mid_tick change * sqrt(10)
 
     let mut roll = RollingStd::new(vol_window_ticks);
 
@@ -906,20 +1003,24 @@ where
             let bb = d.best_bid();
             let ba = d.best_ask();
             if bb.is_nan() || ba.is_nan() {
-                if t % record_every == 0 { recorder.record(hbt).unwrap(); }
+                if t % record_every == 0 {
+                    recorder.record(hbt).unwrap();
+                }
                 continue;
             }
 
             let bbq = d.best_bid_qty();
             let baq = d.best_ask_qty();
             if bbq <= 0.0 || baq <= 0.0 {
-                if t % record_every == 0 { recorder.record(hbt).unwrap(); }
+                if t % record_every == 0 {
+                    recorder.record(hbt).unwrap();
+                }
                 continue;
             }
 
             // micro & mid
             let mid = 0.5 * (bb + ba) as f64;
-            let mp  = (bb as f64 * baq + ba as f64 * bbq) / (baq + bbq);
+            let mp = (bb as f64 * baq + ba as f64 * bbq) / (baq + bbq);
 
             // volatility from mid tick deltas
             let mid_tick = mid / tick_size;
@@ -932,12 +1033,20 @@ where
             prev_mid_tick = mid_tick;
 
             // normalized position (note: *no* borrow of depth here)
-            let pos_qty  = hbt.position(asset); // standalone read; fine inside this scope
+            let pos_qty = hbt.position(asset); // standalone read; fine inside this scope
             let notional = pos_qty * mid;
             let norm_pos = if let Some(max_notional) = max_notional_cap {
-                if max_notional > 0.0 { (notional / max_notional).clamp(-1.0, 1.0) } else { 0.0 }
+                if max_notional > 0.0 {
+                    (notional / max_notional).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                }
             } else {
-                if max_position_qty > 0.0 { (pos_qty / max_position_qty).clamp(-1.0, 1.0) } else { 0.0 }
+                if max_position_qty > 0.0 {
+                    (pos_qty / max_position_qty).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                }
             };
 
             // depths in ticks from vol
@@ -950,7 +1059,9 @@ where
 
             // $100 order size, rounded to lot
             let mut oq = (order_value_usd / mid / lot_size).round();
-            if oq < 1.0 { oq = 1.0; }
+            if oq < 1.0 {
+                oq = 1.0;
+            }
             let order_qty = oq * lot_size;
 
             // clamp to BBO
@@ -1006,11 +1117,13 @@ where
             for o in orders.values() {
                 if o.cancellable() {
                     let keep = match o.side {
-                        Side::Buy  => new_bid.contains_key(&o.order_id),
+                        Side::Buy => new_bid.contains_key(&o.order_id),
                         Side::Sell => new_ask.contains_key(&o.order_id),
                         _ => true,
                     };
-                    if !keep { cancels.push(o.order_id); }
+                    if !keep {
+                        cancels.push(o.order_id);
+                    }
                 }
             }
             // posts (only where not already working)
@@ -1034,14 +1147,34 @@ where
             let _ = hbt.cancel(asset, id, false);
         }
         for (id, px) in post_bids {
-            let _ = Bot::submit_buy_order(hbt, asset, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false);
+            let _ = Bot::submit_buy_order(
+                hbt,
+                asset,
+                id,
+                px,
+                order_qty,
+                TimeInForce::GTX,
+                OrdType::Limit,
+                false,
+            );
         }
         for (id, px) in post_asks {
-            let _ = Bot::submit_sell_order(hbt, asset, id, px, order_qty, TimeInForce::GTX, OrdType::Limit, false);
+            let _ = Bot::submit_sell_order(
+                hbt,
+                asset,
+                id,
+                px,
+                order_qty,
+                TimeInForce::GTX,
+                OrdType::Limit,
+                false,
+            );
         }
 
         // record after updates
-        if t % record_every == 0 { recorder.record(hbt).unwrap(); }
+        if t % record_every == 0 {
+            recorder.record(hbt).unwrap();
+        }
     }
 
     Ok(())
@@ -1071,8 +1204,8 @@ where
     run_loop::<I, R, MD, _>(
         hbt,
         recorder,
-        100_000_000,   // 100ms
-        10,            // record every 1s
+        100_000_000, // 100ms
+        10,          // record every 1s
         move |bot| {
             let d = bot.depth(0);
             let mid = 0.5 * (d.best_bid() + d.best_ask()) as f64;

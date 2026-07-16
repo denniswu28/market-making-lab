@@ -1,48 +1,27 @@
-# ===== Inputs =====
-data_root: "/data/uni/crypto/parquet_tardis"           # raw Tardis parquet
-feeds_output_root: "/data/tmp/tardis_bn_hft/data"      # converted feeds (npz)
-latency_output_root: "/data/tmp/tardis_bn_hft/latency" # derived latency (npz)
-
-tmp_root: "/data/tmp/tardis_bn_hft/.tmp"
+# Optional user-supplied real-data path.
+feeds_output_root: "./out/user_supplied/data"
+latency_output_root: "./out/user_supplied/latency"
+tmp_root: "./out/user_supplied/.tmp"
 keep_temps: false
-
 exchange: "binance-futures"
-symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT", "ONDOUSDT"]
-# symbols: ['ONDOUSDT']
-
-# Dates: either explicit list OR range (inclusive)
-# dates: ["2024-05-01", "2024-05-02"]
-date_from: "2025-08-01"
-date_to:   "2025-08-01"
-
-# ===== Convert settings =====
-snapshot_mode: "auto"     # auto | process | ignore_sod | ignore
-sod_date: "2025-08-01"    # first backtest day (used by 'auto')
-
+symbols: ["SYNTHUSDT"]
+date_from: "2025-01-01"
+date_to: "2025-01-01"
+snapshot_mode: "auto"
+sod_date: "2025-01-01"
 use_quotes: false
-
-num_proc: 4
+num_proc: 1
 buffer_size: 200000000
 ss_buffer_size: 2000000
 base_latency: 0.0
-
-output_format: "npz"          # MUST be 'npz' for latency step
+output_format: "npz"
 delete_inputs_after: false
-skip_existing_feed: false      # skip convert if feed npz already exists
-
-# ===== Latency settings =====
-bucket_every: "1000000000i" # timestamp tick size
-
-# Order latency synthesis:  entry = mul_entry * feed_latency + offset_entry, resp = mul_resp * feed_latency + offset_resp
+skip_existing_feed: false
+bucket_every: "1000000000i"
 mul_entry: 4
-mul_resp: 3
 offset_entry: 0
+mul_resp: 3
 offset_resp: 0
-
 include_symbol_dir: true
 latency_filename_template: "latency_{date}.npz"
 overwrite_latency: true
-
-# python data_pipeline/data_pipeline.py -c data_pipeline/pipeline.yaml
-
-# RUST_LOG=debug /home/wtr2/statmm/target/release/examples/gridtrading_backtest_args --name SOLUSDT --output-path ./out --tick-size 0.01 --lot-size 0.01 --maker-fee 0.0 --taker-fee 0.0007 --queue-power 3.0 --relative-half-spread 0.0005 --relative-grid-interval 0.0005 --grid-num 20 --order-qty 4.18 --max-position 418.0 --skew 2.5e-05 --elapse-ns 1000000000 --record-every 1 --algo obi-static-alpha --transform zscore --window 3600 --look-depth-pct 0.025 --alpha-scale 1000.0 --normalize --data-files /data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250201.npz /data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250202.npz --latency-files /data/tmp/tardis_bn_hft/latency/binance-futures/SOLUSDT/latency_20250201.npz /data/tmp/tardis_bn_hft/latency/binance-futures/SOLUSDT/latency_20250202.npz

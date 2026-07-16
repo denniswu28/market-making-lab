@@ -1,67 +1,13 @@
-# Where your converted feeds & generated latency live (from 1_convert.py / 2_latency.py)
-base_root: "/data/tmp/tardis_bn_hft"
-exchange: "binance-futures"
-symbols: ["BNBUSDT", "SUIUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
-
-# Date range
-date_from: 20250201
-date_to:   20250801
-
-# Optional SOD snapshot (per symbol you can leave blank)
-# initial_snapshot: "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20250131_EOD.npz"
-   # e.g. "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_20240430_SOD.npz"
-initial_snapshot:
-  "*": "/data/tmp/tardis_bn_hft/data/binance-futures/{symbol}/{symbol}_20250131_EOD.npz"
-
-# Path to compiled Rust binary (relative to repo root is fine)
-binary: "/home/wtr2/statmm/target/release/examples/gridtrading_backtest_args"
-
-# Parallelism
-num_proc: 6
-
-# Fees / Queue model
-fees:
-  maker: 0.0000
-  taker:  0.0007
-queue_power: 3.0
-
-# Tick/lot fallback if not in tickers.json (symbol lookup preferred)
-defaults:
-  tick_size: 0.01
-  lot_size: 0.01
-
-# Path to tickers.json (from your ticker.py; includes tick_size/lot_size/weighted_avg_price/min_qty)
-tickers_json: "pipeline/ticker_8.json"
-
-# backtest params
-elapse_ns: 100000000
-rust_log: "error" 
-
-# Grid parameters (shared)
-grid:
-  relative_half_spread: 0.001
-  relative_grid_interval: 0.001
-  grid_num: 20
-  min_grid_step_override: null  # null => use tick_size
-  skew_override: null           # null => rel_half_spread / grid_num
-  order_value_usd: 100
-  max_position_in_grids: 20
-
-# Alpha/price model selection
-algo:
-  name: "obi-static-alpha"   # obi-static-alpha | vamp | weighted-depth | vamp-effective
-  params:
-    look_depth_pct: 0.025    # for obi-static-alpha
-    normalize: true          # for obi-static-alpha
-    alpha_scale: 100.0       # for obi-static-alpha
-    vamp_depth_pct: 0.02     # for vamp / vamp-effective
-    target_qty_per_side: 500 # for weighted-depth
-
-# Time-series transform
-transform:
-  kind: "zscore"       # none | sma | ema | zscore
-  window: 3600         # for sma/zscore
-  ema_alpha: 0.1       # for ema
-
-# Output
-out_path: "./out/test_bnb"      # CSVs per symbol are written here
+fixture: "fixtures/synthetic_l2.csv"
+output_dir: "out/synthetic"
+tick_size: 1.0
+order_qty: 1.0
+max_inventory: 2.0
+half_spread: 1.0
+inventory_skew: 0.25
+entry_latency_ns: 1000000000
+maker_fee: -0.00005
+signal_levels: 2
+signal_window: 3
+alpha_scale: 0.5
+delete_inputs_after: false

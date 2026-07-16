@@ -1,32 +1,13 @@
-# Where your converted feeds live (same base_root used by backtest)
-base_root: "/data/tmp/tardis_bn_hft"
+# Optional user-supplied real-data path.
+base_root: "./out/user_supplied"
 exchange: "binance-futures"
-# symbols: ["SOLUSDT", "SUIUSDT", "BNBUSDT", "TONUSDT", "WIFUSDT", "WLDUSDT", "1000SHIBUSDT", "1000PEPEUSDT"]
-symbols: ["ONDOUSDT"]
-
-# Date or range to build snapshot from
-date_from: 20250129
-date_to:   20250131
-# Or: dates: [20250201, 20250202]
-
-# Output location (defaults to {base_root}/data if omitted)
-output_root: "/data/tmp/tardis_bn_hft/data"
-
-# Produce one snapshot per day (EOD → next day's SOD), otherwise a single snapshot at the end
+symbols: ["SYNTHUSDT"]
+date_from: 20250101
+date_to: 20250101
+output_root: "./out/user_supplied/data"
 per_day: false
-
-# When true, error if any requested feed is missing
 strict: true
-
-# Name suffix in files, e.g. SOLUSDT_20250202_SOD.npz
 suffix: "EOD"
-
-# Optional: use previous day's SOD automatically as the starting snapshot
-# - null: start from empty book
-# - "auto-prev": look for {output_root}/{exchange}/{symbol}/{symbol}_{prev}_SOD.npz
-initial_snapshot: "None"
-
-# Supply sizes directly, or via tickers.json, or let the script fetch missing ones.
-# tick_size: { SOLUSDT: 0.01 }
-# lot_size:  { SOLUSDT: 0.01 }
-tickers_json: "./tickers.json"
+initial_snapshot: null
+tickers_json: "./pipeline/tickers.json"
+delete_inputs_after: false

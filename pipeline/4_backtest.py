@@ -1,380 +1,95 @@
 from __future__ import annotations
+
 import argparse
 import json
-import yaml
-import os
-import glob
 import subprocess
-import pandas as pd
-from datetime import datetime, timedelta
-from multiprocessing import Pool
-from typing import Dict, List, Any, Optional
-from matplotlib import pyplot as plt
-from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 
-def _date_range(d0: int, d1: int) -> List[str]:
-    s = datetime.strptime(str(d0), "%Y%m%d")
-    e = datetime.strptime(str(d1), "%Y%m%d")
-    out = []
-    while s <= e:
-        out.append(s.strftime("%Y%m%d"))
-        s += timedelta(days=1)
-    return out
+SUPPORTED_ALGOS = ("baseline", "obi")
 
 
-def _resolve_initial_snapshot(cfg: dict, symbol: str, first_date_yyyymmdd: str) -> Optional[str]:
-    ini = cfg.get("initial_snapshot")
-    if not ini:
-        return None
-
-    def _fmt(s: str) -> str:
-        return s.format(
-            base_root=cfg["base_root"],
-            exchange=cfg["exchange"],
-            symbol=symbol,
-            date=first_date_yyyymmdd,
-        )
-
-    # string template or fixed path
-    if isinstance(ini, str):
-        path = _fmt(ini)
-        if not os.path.exists(path):
-            raise ValueError(f"Initial snapshot path not found: {path}")
-        return path
-
-    # mapping per symbol (with optional "*" fallback)
-    if isinstance(ini, dict):
-        val = ini.get(symbol) or ini.get("*")
-        if not val:
-            return None
-        path = _fmt(val)
-        if not os.path.exists(path):
-            raise ValueError(f"Initial snapshot path not found: {path}")
-        return path
-
-    return None
+def load_config(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as handle:
+        cfg = yaml.safe_load(handle)
+    if not isinstance(cfg, dict):
+        raise ValueError("configuration must be a mapping")
+    if cfg.get("delete_inputs_after", False):
+        raise ValueError("delete_inputs_after must remain disabled for the public synthetic workflow")
+    return cfg
 
 
-def _files_for(base_root: str, exchange: str, symbol: str, yyyymmdd: str) -> Dict[str, str]:
-    data = os.path.join(base_root, "data",    exchange, symbol, f"{symbol}_{yyyymmdd}.npz")
-    lat  = os.path.join(base_root, "latency", exchange, symbol, f"latency_{yyyymmdd}.npz")
-    return {"data": data, "lat": lat}
-
-
-def _build_cmd(
-    binary: str,
-    name: str,
-    out_path: str,
-    data_files: List[str],
-    latency_files: List[str],
-    tick_size: float,
-    lot_size: float,
-    maker_fee: float,
-    taker_fee: float,
-    queue_power: float,
-    grid: Dict[str, Any],
-    time_ctrl: Dict[str, Any],
-    algo_cfg: Dict[str, Any],
-    xform: Dict[str, Any],
-    initial_snapshot: Optional[str],
-) -> List[str]:
-    args: List[str] = [
-        binary,
-        "--name", name,
-        "--output-path", out_path,
-        "--tick-size", str(tick_size),
-        "--lot-size", str(lot_size),
-        "--maker-fee", str(maker_fee),
-        "--taker-fee", str(taker_fee),
-        "--queue-power", str(queue_power),
-        "--relative-half-spread", str(grid["relative_half_spread"]),
-        "--relative-grid-interval", str(grid["relative_grid_interval"]),
-        "--grid-num", str(grid["grid_num"]),
-        "--order-qty", str(grid["order_qty"]),
-        "--max-position", str(grid["max_position"]),
-        "--skew", str(grid["skew"]),
-        "--elapse-ns", str(time_ctrl.get("elapse_ns", 1_000_000_000)),
-        "--record-every", str(time_ctrl.get("record_every", 1)),
-        "--algo", algo_cfg["name"],
-        "--transform", xform["kind"],
+def build_command(repo_root: Path, cfg: dict[str, Any], algo: str) -> list[str]:
+    fixture = repo_root / cfg["fixture"]
+    output_dir = repo_root / cfg["output_dir"]
+    return [
+        "cargo",
+        "run",
+        "--quiet",
+        "--bin",
+        "statmm-bin",
+        "--",
+        "--fixture",
+        str(fixture),
+        "--output-dir",
+        str(output_dir),
+        "--algo",
+        algo,
+        "--tick-size",
+        str(cfg["tick_size"]),
+        "--order-qty",
+        str(cfg["order_qty"]),
+        "--max-inventory",
+        str(cfg["max_inventory"]),
+        "--half-spread",
+        str(cfg["half_spread"]),
+        "--inventory-skew",
+        str(cfg["inventory_skew"]),
+        "--entry-latency-ns",
+        str(cfg["entry_latency_ns"]),
+        f"--maker-fee={cfg['maker_fee']}",
+        "--signal-levels",
+        str(cfg["signal_levels"]),
+        "--signal-window",
+        str(cfg["signal_window"]),
+        "--alpha-scale",
+        str(cfg["alpha_scale"]),
     ]
-    mgs = grid.get("min_grid_step_override")
-    if mgs is not None:
-        args += ["--min-grid-step", str(mgs)]
-    if initial_snapshot:
-        args += ["--initial-snapshot", initial_snapshot]
-
-    # transform extras
-    kind = xform["kind"].lower()
-    if kind in ("sma", "zscore"):
-        args += ["--window", str(xform.get("window", 300))]
-    if kind == "ema":
-        args += ["--ema-alpha", str(xform.get("ema_alpha", 0.1))]
-
-    # algo extras
-    algo_name = algo_cfg["name"].lower()
-    p = algo_cfg.get("params", {}) or {}
-    if algo_name == "obi-static-alpha":
-        args += [
-            "--look-depth-pct", str(p.get("look_depth_pct", 0.02)),
-            "--alpha-scale",    str(p.get("alpha_scale", 50.0)),
-        ]
-        if p.get("normalize", True):
-            args += ["--normalize"]          # no "=true/false"
-    elif algo_name in ("vamp", "vamp-effective"):
-        args += ["--vamp-depth-pct", str(p.get("vamp_depth_pct", 0.02))]
-    elif algo_name == "weighted-depth":
-        args += ["--target-qty-per-side", str(p.get("target_qty_per_side", 500.0))]
-    elif algo_name == "glft-simple":
-        # Only pass the flags your binary actually supports.
-        args += [
-            "--glft-vol-window", str(int(p.get("glft_vol_window", 6000))),
-            "--glft-vol-scale",  str(p.get("glft_vol_scale", 0.5)),
-        ]
-        # Do NOT pass --order-value-usd or any other GLFT options if the binary doesn't expose them.
-    else:
-        raise ValueError(f"Unsupported algo: {algo_name}")
-
-    # variable-length files last (to keep parsing simple)
-    args += ["--data-files", *data_files]
-    if latency_files:
-        args += ["--latency-files", *latency_files]
-    else:
-        args += ["--latency-files"]  # empty is allowed
-    return args
 
 
-def _symbol_params(symbol: str, tickers: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
-    dflt = cfg["defaults"]
-    info = tickers.get(symbol, {})
-
-    tick_size = float(info.get("tick_size", dflt["tick_size"]))
-    lot_size  = float(info.get("lot_size",  dflt["lot_size"]))
-    wap       = float(info.get("weighted_avg_price", 100.0))
-    min_qty   = float(info.get("min_qty", lot_size))
-
-    grid = cfg["grid"].copy()
-    # order qty ~ fixed USD notion (no CLI flag; we compute qty here)
-    px = wap
-    order_qty100       = round((grid["order_value_usd"] / px) / lot_size) * lot_size
-    grid["order_qty"]  = max(min_qty, order_qty100)
-    grid["max_position"] = grid["max_position_in_grids"] * grid["order_qty"]
-
-    if grid.get("skew_override") is None:
-        grid["skew"] = grid["relative_half_spread"] / grid["grid_num"]
-    else:
-        grid["skew"] = float(grid["skew_override"])
-
-    return dict(tick_size=tick_size, lot_size=lot_size, grid=grid)
+def run_case(repo_root: Path, cfg: dict[str, Any], algo: str) -> dict[str, Any]:
+    if algo not in SUPPORTED_ALGOS:
+        raise ValueError(f"unsupported algo: {algo}")
+    command = build_command(repo_root, cfg, algo)
+    subprocess.run(command, cwd=repo_root, check=True)
+    summary_path = repo_root / cfg["output_dir"] / f"{algo}_summary.json"
+    with summary_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def _run_one(args: dict) -> int:
-    cmd = _build_cmd(**{k: v for k, v in args.items() if k not in ("rust_log", "rust_backtrace")})
-
-    env = os.environ.copy()
-    if args.get("rust_log"):
-        env["RUST_LOG"] = args["rust_log"]
-    if args.get("rust_backtrace") is not None:
-        env["RUST_BACKTRACE"] = str(args["rust_backtrace"])
-
-    print(f"Launching {args['name']} with RUST_LOG={env.get('RUST_LOG')} RUST_BACKTRACE={env.get('RUST_BACKTRACE')}")
-    proc = subprocess.run(cmd, env=env)
-    print(f"{args['name']}: return={proc.returncode}")
-    return proc.returncode
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the supported synthetic baseline and OBI comparison")
+    parser.add_argument("-c", "--config", default="pipeline/backtest_config.yaml")
+    return parser.parse_args()
 
 
-def _first_result_csv(out_path: str, symbol: str) -> Optional[str]:
-    patt = os.path.join(out_path, f"{symbol}*.csv")
-    matches = sorted(glob.glob(patt))
-    return matches[0] if matches else None
+def main() -> None:
+    args = parse_args()
+    repo_root = Path(__file__).resolve().parents[1]
+    cfg = load_config(repo_root / args.config)
 
-
-def _read_result_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    # keep a DateTimeIndex (ints → ns since epoch; ISO strings also OK)
-    df.index = pd.to_datetime(df["timestamp"])
-    if "price" not in df.columns and "mid_price" in df.columns:
-        df = df.rename(columns={"mid_price": "price"})
-    return df
-
-
-def _approx_daily_trades(df: pd.DataFrame, usd_per_order: float) -> float:
-    pos = df["position"]
-    mid = df["price"]
-    mid_1d_last = mid.resample("1D").last()
-    notional_qty = pos.diff().abs().rolling("1D").sum().resample("1D").last()
-    notional_turnover = notional_qty * mid_1d_last
-    approx_trades = (notional_turnover / max(1e-9, usd_per_order)).dropna()
-    return float(approx_trades.mean()) if len(approx_trades) else 0.0
-
-
-def _summarize_and_plot(out_path: str, symbols: list[str], usd_per_order: float) -> None:
-    os.makedirs(out_path, exist_ok=True)
-    plot_dir = os.path.join(out_path, "plots")
-    os.makedirs(plot_dir, exist_ok=True)
-
-    sel_pairs: list[str] = []
-    total_equity_5m: pd.Series | None = None
-    rows = []
-
-    for i, sym in enumerate(symbols):
-        result_csv = _first_result_csv(out_path, sym)
-        if not result_csv or not os.path.exists(result_csv):
-            print(f"[summary] WARN: no result CSV for {sym} in {out_path}")
-            continue
-
-        df = _read_result_csv(result_csv)
-
-        # Equity = cash + position * price - fee
-        if "price" not in df.columns:
-            print(f"[summary] WARN: no price/mid_price in {result_csv}; skipping {sym}")
-            continue
-
-        equity = df["balance"] + df["position"] * df["price"] - df["fee"]
-        equity_5m = equity.resample("5min").last()
-
-        avg_daily_trades = _approx_daily_trades(df, usd_per_order)
-
-        fig = plt.figure(i, figsize=(12, 6))
-        ax = fig.add_subplot(111)
-        ax.set_title(f"{sym}, approx avg daily trades: {avg_daily_trades:.0f}")
-        ax.set_ylabel("Equity $")
-
-        ax.plot(equity_5m.index, equity_5m, label="Equity")
-
-        # Pretty date ticks
-        locator = AutoDateLocator()
-        formatter = ConciseDateFormatter(locator)
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(formatter)
-
-        ax.legend(loc="upper left")
-
-        ax_pos = ax.twinx()
-        ax_pos.set_ylabel("Position Qty")
-        pos_5m = df["position"].resample("5min").last()
-        ax_pos.plot(pos_5m.index, pos_5m, alpha=0.5, label="Position Qty")
-        ax_pos.legend(loc="upper right")
-
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, f"{sym}.png"))
-        plt.close(fig)
-
-        # Select winners
-        if len(equity) and equity.iloc[-1] > equity.iloc[0]:
-            sel_pairs.append(sym)
-            total_equity_5m = equity_5m if total_equity_5m is None else total_equity_5m.add(equity_5m, fill_value=0.0)
-
-        # Summary row
-        start_eq = float(equity.iloc[0]) if len(equity) else 0.0
-        end_eq   = float(equity.iloc[-1]) if len(equity) else 0.0
-        ret_abs  = end_eq - start_eq
-        ret_pct  = (ret_abs / start_eq * 100.0) if start_eq != 0 else float("nan")
-        rows.append(dict(
-            symbol=sym,
-            start_equity=start_eq,
-            end_equity=end_eq,
-            ret_abs=ret_abs,
-            ret_pct=ret_pct,
-            approx_avg_daily_trades=avg_daily_trades,
-            csv=result_csv,
-            plot=os.path.join(plot_dir, f"{sym}.png"),
-        ))
-
-    # Combined equity for winners
-    if total_equity_5m is not None and len(total_equity_5m.dropna()):
-        fig = plt.figure(figsize=(12, 6))
-        ax = fig.add_subplot(111)
-        locator = AutoDateLocator()
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_major_formatter(ConciseDateFormatter(locator))
-        ax.set_title(f"Combined Equity of {len(sel_pairs)} winning pairs")
-        ax.set_ylabel("Equity $")
-        ax.plot(total_equity_5m, label="Combined Equity")
-        ax.legend(loc="upper left")
-        fig.tight_layout()
-        fig.autofmt_xdate()
-        fig.savefig(os.path.join(plot_dir, "combined_equity.png"))
-        plt.close(fig)
-        print(f"[summary] Winners: {sel_pairs}")
-    else:
-        print("[summary] No winners or no equity series to combine.")
-
-    if rows:
-        pd.DataFrame(rows).to_csv(os.path.join(out_path, "summary.csv"), index=False)
-        print(f"[summary] Wrote {os.path.join(out_path, 'summary.csv')}")
-    else:
-        print("[summary] Nothing to summarize.")
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("-c", "--config", default="pipeline/backtest_config.yaml")
-    args = ap.parse_args()
-
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-
-    base     = cfg["base_root"]
-    exch     = cfg["exchange"]
-    symbols  = cfg["symbols"]
-    date_from = int(cfg["date_from"])
-    date_to   = int(cfg["date_to"])
-    dates     = _date_range(date_from, date_to)
-    first_date = dates[0]
-
-    with open(cfg["tickers_json"], "r", encoding="utf-8") as f:
-        tickers = json.load(f)
-
-    time_ctrl = dict(
-        elapse_ns    = cfg.get("elapse_ns", 1_000_000_000),
-        record_every = cfg.get("record_every", 1),
-    )
-
-    os.makedirs(cfg["out_path"], exist_ok=True)
-
-    jobs = []
-    for sym in symbols:
-        p = _symbol_params(sym, tickers, cfg)
-        files = [_files_for(base, exch, sym, d) for d in dates]
-
-        # Only pass existing files to the runner
-        data_files    = [f["data"] for f in files if os.path.exists(f["data"])]
-        latency_files = [f["lat"]  for f in files if os.path.exists(f["lat"])]
-
-        if not data_files:
-            print(f"[backtest] WARN: no data files for {sym}; skipping.")
-            continue
-
-        jobs.append(dict(
-            binary = cfg["binary"],
-            name   = sym,
-            out_path = cfg["out_path"],
-            data_files = data_files,
-            latency_files = latency_files,
-            tick_size = p["tick_size"],
-            lot_size  = p["lot_size"],
-            maker_fee = cfg["fees"]["maker"],
-            taker_fee = cfg["fees"]["taker"],
-            queue_power = cfg.get("queue_power", 3.0),
-            grid = p["grid"],
-            time_ctrl = time_ctrl,
-            algo_cfg = cfg["algo"],
-            xform = cfg["transform"],
-            initial_snapshot = _resolve_initial_snapshot(cfg, sym, first_date),
-            rust_log = cfg.get("rust_log"),
-            rust_backtrace = cfg.get("rust_backtrace"),
-        ))
-
-    with Pool(processes=int(cfg.get("num_proc", 4))) as pool:
-        ret = pool.map(_run_one, jobs)
-
-    bad = sum(1 for r in ret if r != 0)
-    print(f"Done. {len(ret)-bad} OK / {bad} FAIL")
-
-    usd_per_order = float(cfg["grid"].get("order_value_usd", 100.0))
-    _summarize_and_plot(cfg["out_path"], symbols, usd_per_order)
+    summaries = {algo: run_case(repo_root, cfg, algo) for algo in SUPPORTED_ALGOS}
+    output_dir = repo_root / cfg["output_dir"]
+    print("Synthetic market-making comparison complete:")
+    for algo, summary in summaries.items():
+        print(
+            f"  {algo}: final_mtm={summary['final_mark_to_market']:.6f}, "
+            f"inventory={summary['final_inventory']:.6f}, fills={summary['fills']}"
+        )
+    print(f"Artifacts written to {output_dir}")
 
 
 if __name__ == "__main__":
