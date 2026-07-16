@@ -59,7 +59,7 @@ The public synthetic workflow explicitly assumes:
 - no lookahead in OBI warm-up or signal standardization;
 - full-fill/no-partial-fill behavior once the synthetic book crosses a resting quote;
 - maker-fee accounting with signed fees or rebates;
-- inventory caps enforced by suppressing additional same-side quotes;
+- inventory caps enforced by suppressing any same-side quote that would exceed the cap;
 - cancellations and replacements applied when a new desired quote differs from the currently active quote.
 
 The supported public example is intentionally narrow:

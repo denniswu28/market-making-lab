@@ -10,11 +10,7 @@ from datetime import datetime, timedelta
 from multiprocessing import Pool
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import numpy as np
-import pandas as pd
 import yaml
-from matplotlib import pyplot as plt
-import matplotlib.dates as mdates
 
 # --------------------------- helpers: dates, files, params ---------------------------
 
@@ -26,6 +22,27 @@ def _date_range(d0: int, d1: int) -> List[str]:
         out.append(s.strftime("%Y%m%d"))
         s += timedelta(days=1)
     return out
+
+def _date_partitions(cfg: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
+    gridsearch = cfg.get("gridsearch", {}) or {}
+    partitions: List[Tuple[str, List[str]]] = []
+    previous_end: Optional[datetime] = None
+    for phase in ("train", "validation", "test"):
+        dates = gridsearch.get(f"{phase}_dates")
+        if not isinstance(dates, (list, tuple)) or len(dates) != 2:
+            raise ValueError(f"gridsearch.{phase}_dates must contain a start and end date")
+        try:
+            start = datetime.strptime(str(dates[0]), "%Y%m%d")
+            end = datetime.strptime(str(dates[1]), "%Y%m%d")
+        except ValueError as error:
+            raise ValueError(f"gridsearch.{phase}_dates must use YYYYMMDD dates") from error
+        if start > end:
+            raise ValueError(f"gridsearch.{phase}_dates must be ordered")
+        if previous_end is not None and start <= previous_end:
+            raise ValueError("gridsearch train, validation, and test dates must be non-overlapping and ordered")
+        partitions.append((phase, _date_range(int(dates[0]), int(dates[1]))))
+        previous_end = end
+    return partitions
 
 def _files_for(base_root: str, exchange: str, symbol: str, yyyymmdd: str) -> Dict[str, str]:
     data = os.path.join(base_root, "data", exchange, symbol, f"{symbol}_{yyyymmdd}.npz")
@@ -291,6 +308,7 @@ def _transform_variants(cfg_transform: Dict[str, Any], gs_transform: Optional[Di
 @dataclass
 class RunSpec:
     name: str
+    phase: str
     symbol: str
     data_files: List[str]
     latency_files: List[str]
@@ -319,10 +337,7 @@ def _as_list(v) -> List[Any]:
 def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
     base = cfg["base_root"]
     exch = cfg["exchange"]
-    date_from = int(cfg["date_from"])
-    date_to   = int(cfg["date_to"])
-    dates = _date_range(date_from, date_to)
-    first_date = dates[0]
+    partitions = _date_partitions(cfg)
 
     with open(cfg["tickers_json"], "r", encoding="utf-8") as f:
         tickers = json.load(f)
@@ -375,69 +390,71 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
     )
 
     runs: List[RunSpec] = []
-    for sym in symbols:
-        base_params = _symbol_base_grid(sym, tickers, cfg)
-        # files
-        files = [_files_for(base, exch, sym, d) for d in dates]
-        data_files = [f["data"] for f in files if os.path.exists(f["data"])]
-        latency_files = [f["lat"] for f in files if os.path.exists(f["lat"])]
-        if not data_files:
-            print(f"[gridsearch] WARN: no data files for {sym}; skipping.")
-            continue
+    for phase, dates in partitions:
+        for sym in symbols:
+            base_params = _symbol_base_grid(sym, tickers, cfg)
+            # files
+            files = [_files_for(base, exch, sym, d) for d in dates]
+            data_files = [f["data"] for f in files if os.path.exists(f["data"])]
+            latency_files = [f["lat"] for f in files if os.path.exists(f["lat"])]
+            if not data_files:
+                print(f"[gridsearch] WARN: no {phase} data files for {sym}; skipping.")
+                continue
 
-        # resolve per-symbol initial snapshot (if configured/templates provided)
-        init_snap = _resolve_initial_snapshot(cfg, sym, first_date)
+            # resolve per-symbol initial snapshot (if configured/templates provided)
+            init_snap = _resolve_initial_snapshot(cfg, sym, dates[0])
 
-        for combo in _param_grid_iter(param_grid):
-            g = dict(base_params["grid"])
-            rhs = float(combo["rel_half_spread"])
-            n   = int(combo["grid_num"])
-            rgi = rhs if rgi_same else float(combo.get("relative_grid_interval", rhs))
+            for combo in _param_grid_iter(param_grid):
+                g = dict(base_params["grid"])
+                rhs = float(combo["rel_half_spread"])
+                n   = int(combo["grid_num"])
+                rgi = rhs if rgi_same else float(combo.get("relative_grid_interval", rhs))
 
-            g["relative_half_spread"]   = rhs
-            g["relative_grid_interval"] = rgi
-            g["grid_num"]               = n
+                g["relative_half_spread"]   = rhs
+                g["relative_grid_interval"] = rgi
+                g["grid_num"]               = n
 
-            if skew_mode == "rel_over_n":
-                g["skew"] = (rhs / n) if n != 0 else 0.0
-            else:
-                g["skew"] = float(combo["skew_fixed_value"])
+                if skew_mode == "rel_over_n":
+                    g["skew"] = (rhs / n) if n != 0 else 0.0
+                else:
+                    g["skew"] = float(combo["skew_fixed_value"])
 
-            if mp_mode == "equal_to_grid_num":
-                g["max_position"] = g["order_qty"] * n
+                if mp_mode == "equal_to_grid_num":
+                    g["max_position"] = g["order_qty"] * n
 
-            algo_cfg = dict(cfg["algo"])
-            if "params" not in algo_cfg or algo_cfg["params"] is None:
-                algo_cfg["params"] = {}
-            for k, v in combo.items():
-                if k.startswith("algo::"):
-                    algo_cfg["params"][k.split("::", 1)[1]] = v
+                algo_cfg = dict(cfg["algo"])
+                if "params" not in algo_cfg or algo_cfg["params"] is None:
+                    algo_cfg["params"] = {}
+                for k, v in combo.items():
+                    if k.startswith("algo::"):
+                        algo_cfg["params"][k.split("::", 1)[1]] = v
 
-            for xf in xform_variants:
-                xform = dict(xf)
-                name = _name_for_run(sym, rhs, rgi, n, g["skew"], xform, algo_cfg)
-                runs.append(
-                    RunSpec(
-                        name=name,
-                        symbol=sym,
-                        data_files=data_files,
-                        latency_files=latency_files,
-                        tick_size=base_params["tick_size"],
-                        lot_size=base_params["lot_size"],
-                        maker_fee=cfg["fees"]["maker"],
-                        taker_fee=cfg["fees"]["taker"],
-                        queue_power=cfg.get("queue_power", 3.0),
-                        grid=g,
-                        time_ctrl=time_ctrl,
-                        algo_cfg=algo_cfg,
-                        xform=xform,
-                        initial_snapshot=init_snap,
-                        rust_log=cfg.get("rust_log"),
-                        rust_backtrace=cfg.get("rust_backtrace"),
-                        out_path=cfg["out_path"],
-                        binary=cfg["binary"],
+                for xf in xform_variants:
+                    xform = dict(xf)
+                    name = f"{phase}__{_name_for_run(sym, rhs, rgi, n, g['skew'], xform, algo_cfg)}"
+                    runs.append(
+                        RunSpec(
+                            name=name,
+                            phase=phase,
+                            symbol=sym,
+                            data_files=data_files,
+                            latency_files=latency_files,
+                            tick_size=base_params["tick_size"],
+                            lot_size=base_params["lot_size"],
+                            maker_fee=cfg["fees"]["maker"],
+                            taker_fee=cfg["fees"]["taker"],
+                            queue_power=cfg.get("queue_power", 3.0),
+                            grid=g,
+                            time_ctrl=time_ctrl,
+                            algo_cfg=algo_cfg,
+                            xform=xform,
+                            initial_snapshot=init_snap,
+                            rust_log=cfg.get("rust_log"),
+                            rust_backtrace=cfg.get("rust_backtrace"),
+                            out_path=cfg["out_path"],
+                            binary=cfg["binary"],
+                        )
                     )
-                )
     return runs
 
 # --------------------------- worker ---------------------------
@@ -472,6 +489,12 @@ def _run_one(spec: RunSpec) -> Tuple[RunSpec, int]:
 # --------------------------- summary / plots ---------------------------
 
 def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_order: float) -> pd.DataFrame:
+    global mdates, np, pd, plt
+    import numpy as np
+    import pandas as pd
+    from matplotlib import dates as mdates
+    from matplotlib import pyplot as plt
+
     os.makedirs(out_dir, exist_ok=True)
     plot_dir = os.path.join(out_dir, "gridsearch_plots")
     if make_plots:

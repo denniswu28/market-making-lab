@@ -48,6 +48,6 @@ gridsearch:
   skip_existing: false
   random_seed: 7
   train_dates: [20250101, 20250101]
-  validation_dates: [20250101, 20250101]
-  test_dates: [20250101, 20250101]
+  validation_dates: [20250102, 20250102]
+  test_dates: [20250103, 20250103]
 delete_inputs_after: false

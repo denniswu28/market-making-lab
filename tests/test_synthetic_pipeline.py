@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -43,7 +44,7 @@ class SyntheticPipelineTests(unittest.TestCase):
             config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
 
             subprocess.run(
-                ["python", str(BACKTEST_PATH), "-c", str(config_path)],
+                [sys.executable, str(BACKTEST_PATH), "-c", str(config_path)],
                 cwd=REPO_ROOT,
                 check=True,
             )
