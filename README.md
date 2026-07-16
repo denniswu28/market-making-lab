@@ -14,6 +14,7 @@ How can order-book and short-horizon statistical signals be incorporated into an
   - a signal-free market-making baseline; and
   - an order-book-imbalance (OBI) variant with trailing-window warm-up.
 - A minimal Python wrapper that runs both variants without exchange credentials, vendor data, network access, or a sibling checkout.
+- An optional, offline-only HftBacktest `.npz` grid-search adapter for user-supplied research data.
 
 ## Architecture
 
@@ -49,6 +50,20 @@ The output is a reproducible simulation artifact, not investment performance and
 ## Optional user-supplied real-data path
 
 The numbered `pipeline/` conversion and latency scripts are kept only as optional, user-run research scaffolding for self-supplied data under the user's own vendor terms. Current repository evidence demonstrates Tardis conversion and Binance Futures metadata/data paths. Do **not** treat the repository as verified general Binance or OKX production integration.
+
+The optional grid search uses the pinned upstream HftBacktest APIs and requires `.npz` market-data,
+latency, and (when configured) initial-snapshot files in the upstream schema. It does not accept the
+CSV fixture; use the synthetic quick start for that workflow. Its Python analysis dependencies are
+isolated from the default installation:
+
+```bash
+python -m pip install -r requirements-research.txt
+cargo build --release --example gridtrading_backtest_args
+```
+
+Before a test partition can run, set `gridsearch.locked_candidate` to exactly one `candidate_id`
+from the phase-separated validation summary. The template deliberately leaves this as
+`TODO(Dennis)`; the pipeline does not select or rank a held-out candidate automatically.
 
 ## Tested assumptions and limitations
 

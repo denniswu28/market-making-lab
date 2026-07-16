@@ -7,7 +7,7 @@ This repository depends on and adapts the upstream MIT-licensed `nkaz001/hftback
 | Local path | Closest upstream reference | Boundary | Current status |
 | --- | --- | --- | --- |
 | `examples/gridtrading_backtest.rs` | `hftbacktest/examples/gridtrading_backtest.rs` | Upstream example name retained; local file now wraps the repository-owned synthetic fixture instead of vendor market data paths. | Supported as a synthetic baseline wrapper. |
-| `examples/gridtrading_backtest_args.rs` | Upstream Rust example + local historical CLI adaptation | Local wrapper around the synthetic fixture for reproducible example argument handling. | Supported example wrapper. |
+| `examples/gridtrading_backtest_args.rs` | Upstream `hftbacktest/examples/gridtrading_backtest_args.rs` plus local strategy adaptation | Offline adapter over pinned upstream `Backtest`, L2 asset, latency, queue, fee, snapshot, and recorder APIs for user-supplied `.npz` data. | Experimental user-data research only; no live execution. |
 | `src/algo.rs` | Upstream grid-trading and market-making tutorial patterns | Repository adaptation layer for OBI, VAMP, weighted-depth, and GLFT-style quote logic against upstream APIs. | Experimental / user-data-facing. |
 | `ob_backtest.ipynb` | Upstream tutorial lineage, especially "Market Making with Alpha - Order Book Imbalance" | Historical notebook replaced with an unexecuted synthetic walkthrough to avoid redistributing unsupported claims or local paths. | Documentation-only. |
 | `ob_backtest.py` | Historical notebook export / local orchestration | Retained filename now delegates to the supported synthetic workflow. | Supported offline entry point. |

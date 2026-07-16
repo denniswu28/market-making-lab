@@ -1,131 +1,272 @@
 use std::path::PathBuf;
 
-use clap::Parser;
-use statmm::synthetic::{
-    AlgoKind, SyntheticConfig, load_fixture_csv, run_synthetic_market_maker, write_records_csv,
-    write_summary_json,
+use clap::{Parser, ValueEnum};
+use hftbacktest::{
+    backtest::{
+        Backtest, DataSource, ExchangeKind, L2AssetBuilder,
+        assettype::LinearAsset,
+        data::read_npz_file,
+        models::{
+            CommonFees, IntpOrderLatency, PowerProbQueueFunc3, ProbQueueModel, TradingValueFeeModel,
+        },
+        recorder::BacktestRecorder,
+    },
+    prelude::{ApplySnapshot, Bot, HashMapMarketDepth},
+};
+use statmm::algo::{
+    Transform, grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair,
+    grid_weighted_depth_fair, gridtrading,
 };
 
+#[derive(Clone, Debug, ValueEnum)]
+enum Algorithm {
+    Baseline,
+    ObiStaticAlpha,
+    Vamp,
+    VampEffective,
+    WeightedDepth,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum TransformKind {
+    None,
+    Sma,
+    Ema,
+    Zscore,
+}
+
 #[derive(Debug, Parser)]
+#[command(about = "Experimental offline HftBacktest grid search; live execution is not supported.")]
 struct Args {
-    #[arg(long, default_value = "fixtures/synthetic_l2.csv")]
-    fixture: PathBuf,
-    #[arg(long, default_value = "out/example_args")]
-    output_dir: PathBuf,
     #[arg(long)]
-    name: Option<String>,
+    name: String,
     #[arg(long)]
-    output_path: Option<PathBuf>,
-    #[arg(long, default_value_t = 1.0)]
-    tick_size: f64,
-    #[arg(long)]
-    lot_size: Option<f64>,
-    #[arg(long, allow_hyphen_values = true, default_value_t = -0.00005)]
-    maker_fee: f64,
-    #[arg(long)]
-    taker_fee: Option<f64>,
-    #[arg(long)]
-    queue_power: Option<f64>,
-    #[arg(long)]
-    relative_half_spread: Option<f64>,
-    #[arg(long)]
-    relative_grid_interval: Option<f64>,
-    #[arg(long)]
-    grid_num: Option<usize>,
-    #[arg(long, default_value_t = 1.0)]
-    order_qty: f64,
-    #[arg(long)]
-    max_position: Option<f64>,
-    #[arg(long)]
-    skew: Option<f64>,
-    #[arg(long)]
-    elapse_ns: Option<i64>,
-    #[arg(long)]
-    record_every: Option<usize>,
-    #[arg(long, default_value = "obi")]
-    algo: String,
-    #[arg(long)]
-    transform: Option<String>,
-    #[arg(long)]
-    min_grid_step: Option<f64>,
+    output_path: PathBuf,
+    #[arg(long, num_args = 1..)]
+    data_files: Vec<PathBuf>,
+    #[arg(long, num_args = 1..)]
+    latency_files: Vec<PathBuf>,
     #[arg(long)]
     initial_snapshot: Option<PathBuf>,
     #[arg(long)]
-    window: Option<usize>,
+    tick_size: f64,
     #[arg(long)]
-    ema_alpha: Option<f64>,
+    lot_size: f64,
     #[arg(long)]
-    look_depth_pct: Option<f64>,
-    #[arg(long, default_value_t = 0.5)]
-    alpha_scale: f64,
+    relative_half_spread: f64,
+    #[arg(long)]
+    relative_grid_interval: f64,
+    #[arg(long)]
+    skew: f64,
+    #[arg(long)]
+    grid_num: usize,
+    #[arg(long)]
+    min_grid_step: Option<f64>,
+    #[arg(long)]
+    order_qty: f64,
+    #[arg(long)]
+    max_position: f64,
+    #[arg(long, allow_hyphen_values = true, default_value_t = -0.00005)]
+    maker_fee: f64,
+    #[arg(long, default_value_t = 0.0007)]
+    taker_fee: f64,
+    #[arg(long, default_value_t = 3.0)]
+    queue_power: f64,
+    #[arg(long, default_value_t = 100_000_000)]
+    elapse_ns: i64,
+    #[arg(long, default_value_t = 10)]
+    record_every: usize,
+    #[arg(long, value_enum)]
+    algo: Algorithm,
+    #[arg(long, value_enum, default_value_t = TransformKind::None)]
+    transform: TransformKind,
+    #[arg(long, default_value_t = 300)]
+    window: usize,
+    #[arg(long, default_value_t = 0.1)]
+    ema_alpha: f64,
+    #[arg(long, default_value_t = 0.02)]
+    look_depth_pct: f64,
     #[arg(long)]
     normalize: bool,
-    #[arg(long)]
-    vamp_depth_pct: Option<f64>,
-    #[arg(long)]
-    target_qty_per_side: Option<f64>,
-    #[arg(long)]
-    glft_vol_window: Option<usize>,
-    #[arg(long)]
-    glft_vol_scale: Option<f64>,
-    #[arg(long, num_args = 1..)]
-    data_files: Vec<PathBuf>,
-    #[arg(long, num_args = 0..)]
-    latency_files: Vec<PathBuf>,
+    #[arg(long, default_value_t = 50.0)]
+    alpha_scale: f64,
+    #[arg(long, default_value_t = 0.02)]
+    vamp_depth_pct: f64,
+    #[arg(long, default_value_t = 500.0)]
+    target_qty_per_side: f64,
+}
+
+fn transform(args: &Args) -> Result<Transform, String> {
+    match args.transform {
+        TransformKind::None => Ok(Transform::None),
+        TransformKind::Sma if args.window > 0 => Ok(Transform::SMA {
+            window: args.window,
+        }),
+        TransformKind::Ema if (0.0..=1.0).contains(&args.ema_alpha) && args.ema_alpha > 0.0 => {
+            Ok(Transform::EMA {
+                alpha: args.ema_alpha,
+            })
+        }
+        TransformKind::Zscore if args.window > 0 => Ok(Transform::ZScore {
+            window: args.window,
+        }),
+        TransformKind::Sma | TransformKind::Zscore => {
+            Err("--window must be positive for sma and zscore transforms".to_string())
+        }
+        TransformKind::Ema => Err("--ema-alpha must be in (0, 1] for ema transforms".to_string()),
+    }
 }
 
 fn main() -> Result<(), String> {
     let args = Args::parse();
-    let fixture = args.data_files.first().unwrap_or(&args.fixture);
-    let output_dir = args.output_path.as_ref().unwrap_or(&args.output_dir);
-    let algo = if args.algo == "baseline" {
-        AlgoKind::Baseline
-    } else {
-        AlgoKind::Obi
-    };
-    let _ = (
-        args.lot_size,
-        args.taker_fee,
-        args.queue_power,
-        args.relative_half_spread,
-        args.relative_grid_interval,
-        args.grid_num,
-        args.skew,
-        args.record_every,
-        args.transform,
-        args.min_grid_step,
-        args.initial_snapshot,
-        args.window,
-        args.ema_alpha,
-        args.look_depth_pct,
-        args.normalize,
-        args.vamp_depth_pct,
-        args.target_qty_per_side,
-        args.glft_vol_window,
-        args.glft_vol_scale,
-        args.latency_files,
-    );
-    std::fs::create_dir_all(output_dir)
-        .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
+    if args
+        .data_files
+        .iter()
+        .any(|path| path.extension().is_some_and(|ext| ext == "csv"))
+    {
+        return Err(
+            "CSV fixtures are only supported by the offline synthetic examples; this research CLI requires HftBacktest .npz files"
+                .to_string(),
+        );
+    }
+    if args.record_every == 0 || args.elapse_ns <= 0 {
+        return Err("--record-every and --elapse-ns must be positive".to_string());
+    }
+    if args.tick_size <= 0.0 || args.lot_size <= 0.0 || args.order_qty <= 0.0 {
+        return Err("--tick-size, --lot-size, and --order-qty must be positive".to_string());
+    }
+    let transform = transform(&args)?;
+    std::fs::create_dir_all(&args.output_path)
+        .map_err(|error| format!("failed to create {}: {error}", args.output_path.display()))?;
 
-    let config = SyntheticConfig {
-        tick_size: args.tick_size,
-        order_qty: args.order_qty,
-        max_inventory: args.max_position.unwrap_or(2.0),
-        entry_latency_ns: args.elapse_ns.unwrap_or(1_000_000_000),
-        maker_fee: args.maker_fee,
-        alpha_scale: args.alpha_scale,
-        algo,
-        ..SyntheticConfig::default()
-    };
-    let result = run_synthetic_market_maker(&config, &load_fixture_csv(fixture)?)?;
-    let stem = args
-        .name
-        .unwrap_or_else(|| result.summary.algo.as_str().to_string());
-    write_records_csv(&output_dir.join(format!("{stem}.csv")), &result)?;
-    write_summary_json(
-        &output_dir.join(format!("{stem}_summary.json")),
-        &result.summary,
-    )?;
+    let data = args
+        .data_files
+        .iter()
+        .map(|file| DataSource::File(file.display().to_string()))
+        .collect();
+    let asset = L2AssetBuilder::new()
+        .data(data)
+        .latency_model(IntpOrderLatency::new(
+            args.latency_files
+                .iter()
+                .map(|file| DataSource::File(file.display().to_string()))
+                .collect(),
+            0,
+        ))
+        .asset_type(LinearAsset::new(1.0))
+        .fee_model(TradingValueFeeModel::new(CommonFees::new(
+            args.maker_fee,
+            args.taker_fee,
+        )))
+        .exchange(ExchangeKind::NoPartialFillExchange)
+        .queue_model(ProbQueueModel::new(PowerProbQueueFunc3::new(
+            args.queue_power,
+        )))
+        .depth({
+            let snapshot = args.initial_snapshot.clone();
+            move || {
+                let mut depth = HashMapMarketDepth::new(args.tick_size, args.lot_size);
+                if let Some(file) = &snapshot {
+                    depth.apply_snapshot(
+                        &read_npz_file(file.to_str().expect("UTF-8 snapshot path"), "data")
+                            .expect("valid HftBacktest snapshot"),
+                    );
+                }
+                depth
+            }
+        })
+        .build()
+        .map_err(|error| format!("failed to build HftBacktest asset: {error:?}"))?;
+    let mut hbt: Backtest<HashMapMarketDepth> = Backtest::builder()
+        .add_asset(asset)
+        .build()
+        .map_err(|error| format!("failed to build HftBacktest: {error:?}"))?;
+    let mut recorder = BacktestRecorder::new(&hbt);
+    let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
+
+    match args.algo {
+        Algorithm::Baseline => gridtrading(
+            &mut hbt,
+            &mut recorder,
+            args.relative_half_spread,
+            args.relative_grid_interval,
+            args.grid_num,
+            min_grid_step,
+            args.skew,
+            args.order_qty,
+            args.max_position,
+        ),
+        Algorithm::ObiStaticAlpha => grid_obi_static_alpha(
+            &mut hbt,
+            &mut recorder,
+            args.relative_half_spread,
+            args.relative_grid_interval,
+            args.grid_num,
+            min_grid_step,
+            args.skew,
+            args.order_qty,
+            args.max_position,
+            args.look_depth_pct,
+            args.normalize,
+            args.alpha_scale,
+            transform,
+            args.elapse_ns,
+            args.record_every,
+        ),
+        Algorithm::Vamp => grid_vamp_fair(
+            &mut hbt,
+            &mut recorder,
+            args.relative_half_spread,
+            args.relative_grid_interval,
+            args.grid_num,
+            min_grid_step,
+            args.skew,
+            args.order_qty,
+            args.max_position,
+            args.vamp_depth_pct,
+            transform,
+            args.alpha_scale,
+            args.elapse_ns,
+            args.record_every,
+        ),
+        Algorithm::VampEffective => grid_vamp_effective_fair(
+            &mut hbt,
+            &mut recorder,
+            args.relative_half_spread,
+            args.relative_grid_interval,
+            args.grid_num,
+            min_grid_step,
+            args.skew,
+            args.order_qty,
+            args.max_position,
+            args.vamp_depth_pct,
+            transform,
+            args.alpha_scale,
+            args.elapse_ns,
+            args.record_every,
+        ),
+        Algorithm::WeightedDepth => grid_weighted_depth_fair(
+            &mut hbt,
+            &mut recorder,
+            args.relative_half_spread,
+            args.relative_grid_interval,
+            args.grid_num,
+            min_grid_step,
+            args.skew,
+            args.order_qty,
+            args.max_position,
+            args.target_qty_per_side,
+            transform,
+            args.alpha_scale,
+            args.elapse_ns,
+            args.record_every,
+        ),
+    }
+    .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+    hbt.close()
+        .map_err(|error| format!("failed to close HftBacktest: {error:?}"))?;
+    recorder
+        .to_csv(&args.name, &args.output_path)
+        .map_err(|error| format!("failed to write recorder output: {error:?}"))?;
     Ok(())
 }

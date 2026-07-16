@@ -50,4 +50,7 @@ gridsearch:
   train_dates: [20250101, 20250101]
   validation_dates: [20250102, 20250102]
   test_dates: [20250103, 20250103]
+  # TODO(Dennis): replace after reviewing gridsearch_validation_summary.csv.
+  # This must be exactly one candidate_id from that file before test data can run.
+  locked_candidate: ["TODO(Dennis)"]
 delete_inputs_after: false

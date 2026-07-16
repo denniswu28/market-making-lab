@@ -1,6 +1,7 @@
 from __future__ import annotations
 import argparse
 import glob
+import hashlib
 import json
 import math
 import os
@@ -95,6 +96,15 @@ def _name_for_run(sym: str, rhs: float, rgi: float, n: int, skew: float,
             f"_rgi{_fmt_float_for_name(rgi)}"
             f"_n{n}_sk{_fmt_float_for_name(skew)}")
 
+def _candidate_id(sym: str, grid: Dict[str, Any], algo_cfg: Dict[str, Any],
+                 xform: Dict[str, Any]) -> str:
+    payload = json.dumps(
+        {"symbol": sym, "grid": grid, "algo": algo_cfg, "transform": xform},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return f"{sym}-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
 def _resolve_initial_snapshot(cfg: dict, symbol: str, first_date_yyyymmdd: str) -> Optional[str]:
     ini = cfg.get("initial_snapshot")
     if not ini:
@@ -172,6 +182,11 @@ def _build_cmd(
     xform: Dict[str, Any],
     initial_snapshot: Optional[str],
 ) -> List[str]:
+    if not latency_files:
+        raise ValueError(
+            "HftBacktest grid search requires --latency-files; generate user-supplied latency "
+            "data before running this research path"
+        )
     args: List[str] = [
         binary,
         "--name", name,
@@ -220,20 +235,16 @@ def _build_cmd(
     elif name_algo == "weighted-depth":
         args += ["--target-qty-per-side", str(p.get("target_qty_per_side", 500.0))]
     elif name_algo == "glft-simple":
-        args += [
-            "--glft-vol-window", str(int(p.get("glft_vol_window", 6000))),
-            "--glft-vol-scale",  str(p.get("glft_vol_scale", 0.5)),
-        ]
-        # Do NOT pass any other GLFT flags if your binary doesn't expose them.
+        raise ValueError(
+            "glft-simple is not supported by the common grid-search CLI because its "
+            "notional-sizing semantics differ; migrate it to a dedicated research command"
+        )
     else:
         raise ValueError(f"Unsupported algo: {name_algo}")
 
     # variable-length files last
     args += ["--data-files", *data_files]
-    if latency_files:
-        args += ["--latency-files", *latency_files]
-    else:
-        args += ["--latency-files"]
+    args += ["--latency-files", *latency_files]
     return args
 
 # --------------------------- mini ParameterGrid ---------------------------
@@ -308,6 +319,7 @@ def _transform_variants(cfg_transform: Dict[str, Any], gs_transform: Optional[Di
 @dataclass
 class RunSpec:
     name: str
+    candidate_id: str
     phase: str
     symbol: str
     data_files: List[str]
@@ -423,18 +435,19 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
                     g["max_position"] = g["order_qty"] * n
 
                 algo_cfg = dict(cfg["algo"])
-                if "params" not in algo_cfg or algo_cfg["params"] is None:
-                    algo_cfg["params"] = {}
+                algo_cfg["params"] = dict(algo_cfg.get("params") or {})
                 for k, v in combo.items():
                     if k.startswith("algo::"):
                         algo_cfg["params"][k.split("::", 1)[1]] = v
 
                 for xf in xform_variants:
                     xform = dict(xf)
+                    candidate_id = _candidate_id(sym, g, algo_cfg, xform)
                     name = f"{phase}__{_name_for_run(sym, rhs, rgi, n, g['skew'], xform, algo_cfg)}"
                     runs.append(
                         RunSpec(
                             name=name,
+                            candidate_id=candidate_id,
                             phase=phase,
                             symbol=sym,
                             data_files=data_files,
@@ -455,7 +468,23 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
                             binary=cfg["binary"],
                         )
                     )
-    return runs
+    validation_candidates = {run.candidate_id for run in runs if run.phase == "validation"}
+    locked = gs.get("locked_candidate")
+    if not isinstance(locked, (list, tuple)) or len(locked) != 1 or not isinstance(locked[0], str):
+        raise ValueError(
+            "gridsearch.locked_candidate must contain exactly one validation candidate ID; "
+            "select it after reviewing the validation summary (TODO(Dennis))"
+        )
+    locked_candidate = locked[0]
+    if locked_candidate not in validation_candidates:
+        raise ValueError(
+            "gridsearch.locked_candidate must match a candidate evaluated on validation; "
+            "select it after reviewing the validation summary (TODO(Dennis))"
+        )
+    test_runs = [run for run in runs if run.phase == "test" and run.candidate_id == locked_candidate]
+    if len(test_runs) != 1:
+        raise ValueError("gridsearch.locked_candidate must produce exactly one held-out test run")
+    return [run for run in runs if run.phase != "test"] + test_runs
 
 # --------------------------- worker ---------------------------
 
@@ -505,7 +534,7 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
         csv_path = _first_result_csv(out_dir, s.name)
         if not csv_path or not os.path.exists(csv_path):
             rows.append(dict(
-                name=s.name, symbol=s.symbol, status="missing_csv",
+                name=s.name, candidate_id=s.candidate_id, phase=s.phase, symbol=s.symbol, status="missing_csv",
                 ret_abs=np.nan, ret_pct=np.nan, start_eq=np.nan, end_eq=np.nan,
                 rel_half_spread=s.grid["relative_half_spread"],
                 relative_grid_interval=s.grid["relative_grid_interval"],
@@ -569,7 +598,7 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
             plt.close(fig)
 
         rows.append(dict(
-            name=s.name, symbol=s.symbol, status="ok",
+            name=s.name, candidate_id=s.candidate_id, phase=s.phase, symbol=s.symbol, status="ok",
             ret_abs=ret_abs, ret_pct=ret_pct, start_eq=start_eq, end_eq=end_eq,
             rel_half_spread=s.grid["relative_half_spread"],
             relative_grid_interval=s.grid["relative_grid_interval"],
@@ -586,16 +615,22 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
         ))
 
     df = pd.DataFrame(rows)
-    out_csv = os.path.join(out_dir, "gridsearch_summary.csv")
-    df.sort_values(["symbol", "ret_abs"], ascending=[True, False]).to_csv(out_csv, index=False)
-    print(f"[summary] wrote {out_csv}")
+    for phase in ("train", "validation", "test"):
+        phase_df = df[df["phase"] == phase]
+        if phase == "test":
+            phase_df = phase_df.sort_values(["symbol", "candidate_id"])
+        else:
+            phase_df = phase_df.sort_values(["symbol", "ret_abs"], ascending=[True, False])
+        out_csv = os.path.join(out_dir, f"gridsearch_{phase}_summary.csv")
+        phase_df.to_csv(out_csv, index=False)
+        print(f"[summary] wrote {out_csv}")
     return df
 
 # --------------------------- CLI ---------------------------
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("-c", "--config", default="pipeline/backtest_config.yaml",
+    ap.add_argument("-c", "--config", default="pipeline/gridsearch_config.yaml",
                     help="Path to YAML backtest config with 'gridsearch' section.")
     ap.add_argument("--processes", type=int, default=None,
                     help="Override parallelism; default uses cfg.num_proc or 4.")
