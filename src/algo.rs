@@ -2,7 +2,6 @@
     clippy::doc_overindented_list_items,
     clippy::empty_line_after_doc_comments,
     clippy::let_and_return,
-    clippy::manual_is_multiple_of,
     clippy::too_many_arguments,
     clippy::type_complexity,
     clippy::unnecessary_cast,
@@ -483,7 +482,7 @@ where
     while ElapseResult::Ok == hbt.elapse(elapse_ns).unwrap() {
         k += 1;
         trace!(k = k, ts = hbt.current_timestamp(), "loop");
-        if k % record_every == 0 {
+        if k.is_multiple_of(record_every) {
             recorder.record(hbt).unwrap();
         }
         let forecast_mid = fair_price_fn(hbt);
@@ -1003,7 +1002,7 @@ where
             let bb = d.best_bid();
             let ba = d.best_ask();
             if bb.is_nan() || ba.is_nan() {
-                if t % record_every == 0 {
+                if t.is_multiple_of(record_every) {
                     recorder.record(hbt).unwrap();
                 }
                 continue;
@@ -1012,7 +1011,7 @@ where
             let bbq = d.best_bid_qty();
             let baq = d.best_ask_qty();
             if bbq <= 0.0 || baq <= 0.0 {
-                if t % record_every == 0 {
+                if t.is_multiple_of(record_every) {
                     recorder.record(hbt).unwrap();
                 }
                 continue;
@@ -1026,7 +1025,7 @@ where
             let mid_tick = mid / tick_size;
             if prev_mid_tick.is_finite() {
                 roll.push(mid_tick - prev_mid_tick);
-                if t % vol_update_every == 0 && roll.len >= vol_window_ticks {
+                if t.is_multiple_of(vol_update_every) && roll.len >= vol_window_ticks {
                     vol_tick_std = roll.std() * 10f64.sqrt();
                 }
             }
@@ -1041,12 +1040,10 @@ where
                 } else {
                     0.0
                 }
+            } else if max_position_qty > 0.0 {
+                (pos_qty / max_position_qty).clamp(-1.0, 1.0)
             } else {
-                if max_position_qty > 0.0 {
-                    (pos_qty / max_position_qty).clamp(-1.0, 1.0)
-                } else {
-                    0.0
-                }
+                0.0
             };
 
             // depths in ticks from vol
@@ -1172,7 +1169,7 @@ where
         }
 
         // record after updates
-        if t % record_every == 0 {
+        if t.is_multiple_of(record_every) {
             recorder.record(hbt).unwrap();
         }
     }
