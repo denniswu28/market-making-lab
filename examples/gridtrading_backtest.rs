@@ -11,8 +11,10 @@ fn main() -> Result<(), String> {
     std::fs::create_dir_all(output_dir)
         .map_err(|error| format!("failed to create {}: {error}", output_dir.display()))?;
 
-    let mut config = SyntheticConfig::default();
-    config.algo = AlgoKind::Baseline;
+    let config = SyntheticConfig {
+        algo: AlgoKind::Baseline,
+        ..SyntheticConfig::default()
+    };
     let result = run_synthetic_market_maker(&config, &load_fixture_csv(fixture)?)?;
     write_records_csv(&output_dir.join("baseline.csv"), &result)?;
     write_summary_json(&output_dir.join("baseline_summary.json"), &result.summary)?;

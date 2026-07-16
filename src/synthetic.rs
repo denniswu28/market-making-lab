@@ -404,12 +404,12 @@ fn desired_quotes(
         config.tick_size,
     );
 
-    let bid = (inventory < config.max_inventory).then_some(Quote {
+    let bid = (inventory + config.order_qty <= config.max_inventory).then_some(Quote {
         side: Side::Buy,
         price: bid_price,
         qty: config.order_qty,
     });
-    let ask = (inventory > -config.max_inventory).then_some(Quote {
+    let ask = (inventory - config.order_qty >= -config.max_inventory).then_some(Quote {
         side: Side::Sell,
         price: ask_price,
         qty: config.order_qty,
@@ -632,6 +632,32 @@ mod tests {
         assert_eq!(result.records[1].inventory, 1.0);
         assert_eq!(result.records[2].bid_quote, None);
         assert_eq!(result.summary.cancellations, 1);
+    }
+
+    #[test]
+    fn inventory_limit_suppresses_bid_that_would_exceed_non_divisible_capacity() {
+        let config = SyntheticConfig {
+            max_inventory: 2.0,
+            order_qty: 1.0,
+            ..SyntheticConfig::default()
+        };
+
+        let (bid, _) = desired_quotes(&config, &event(0, 0, 99.0, 6.0, 101.0, 6.0), 100.0, 1.5);
+
+        assert_eq!(bid, None);
+    }
+
+    #[test]
+    fn inventory_limit_suppresses_ask_that_would_exceed_non_divisible_capacity() {
+        let config = SyntheticConfig {
+            max_inventory: 2.0,
+            order_qty: 1.0,
+            ..SyntheticConfig::default()
+        };
+
+        let (_, ask) = desired_quotes(&config, &event(0, 0, 99.0, 6.0, 101.0, 6.0), 100.0, -1.5);
+
+        assert_eq!(ask, None);
     }
 
     #[test]
