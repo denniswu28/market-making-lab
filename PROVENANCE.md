@@ -38,4 +38,6 @@ This repository demonstrates Dennis Wu's strategy application and validation wor
 
 - `statmm` is declared as MIT in `Cargo.toml`.
 - Upstream `hftbacktest` is MIT-licensed at the pinned revision.
+- The upstream copyright and permission notice is preserved verbatim in
+  [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the materially adapted files listed above.
 - This file records engineering provenance only and does not make a broader legal conclusion beyond the visible repository evidence.

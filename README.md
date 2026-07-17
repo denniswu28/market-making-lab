@@ -74,7 +74,13 @@ python pipeline/5_gridsearch.py --phase test -c pipeline/gridsearch_config.yaml
 The test command refuses to run without the persisted validation summary and a successful matching
 candidate. The template deliberately leaves the lock as `TODO(Dennis)`; the pipeline does not
 select a candidate or run validation and test concurrently. Each successful research CLI run also
-writes a small manifest identifying the strict algorithm/transform dispatch and timing controls.
+writes a Rust execution manifest and a grid-search artifact manifest. The held-out lock verifies
+the candidate's strategy, fees, queue model, timing, engine source and binary identity, declared
+partition plan, validation inputs, and exact validation artifacts before test execution. Retain the
+validation inputs and artifacts until the held-out test is complete. `--skip-existing` resumes only
+artifacts whose manifests and exact result files still match the current run specification. These
+local manifests contain resolved input paths and content hashes; keep the ignored `out/` directory
+private and do not commit user-data research artifacts.
 
 ## Tested assumptions and limitations
 
@@ -97,9 +103,9 @@ The supported public example is intentionally narrow:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --lib --bins --tests -- -D warnings
-cargo test --all-targets
-python -m py_compile pipeline/4_backtest.py ob_backtest.py
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+python -m py_compile pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
 python -m unittest discover -s tests -p 'test_*.py'
 python pipeline/4_backtest.py -c pipeline/backtest_config.yaml
 ```
@@ -110,3 +116,5 @@ python pipeline/4_backtest.py -c pipeline/backtest_config.yaml
 - `delete_inputs_after` remains disabled by default everywhere it appears in tracked configuration.
 - Tracked notebooks are intentionally unexecuted and contain no local data paths or public performance claims.
 - Live trading is outside scope and is not part of the supported public example.
+- Upstream license notices for materially adapted `hftbacktest` code are preserved in
+  `THIRD_PARTY_NOTICES.md`.

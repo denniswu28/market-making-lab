@@ -103,40 +103,58 @@ struct Args {
     algo: Algorithm,
     #[arg(long, value_enum, default_value_t = TransformKind::None)]
     transform: TransformKind,
-    #[arg(long, default_value_t = 300)]
-    window: usize,
-    #[arg(long, default_value_t = 0.1)]
-    ema_alpha: f64,
-    #[arg(long, default_value_t = 0.02)]
-    look_depth_pct: f64,
+    #[arg(long)]
+    window: Option<usize>,
+    #[arg(long)]
+    ema_alpha: Option<f64>,
+    #[arg(long)]
+    look_depth_pct: Option<f64>,
     #[arg(long)]
     normalize: bool,
-    #[arg(long, default_value_t = 50.0)]
-    alpha_scale: f64,
-    #[arg(long, default_value_t = 0.02)]
-    vamp_depth_pct: f64,
-    #[arg(long, default_value_t = 500.0)]
-    target_qty_per_side: f64,
+    #[arg(long)]
+    alpha_scale: Option<f64>,
+    #[arg(long)]
+    vamp_depth_pct: Option<f64>,
+    #[arg(long)]
+    target_qty_per_side: Option<f64>,
 }
 
-fn transform(args: &Args) -> Result<Transform, String> {
+fn transform(args: &Args) -> Result<(Transform, String), String> {
     match args.transform {
-        TransformKind::None => Ok(Transform::None),
-        TransformKind::Sma if args.window > 0 => Ok(Transform::SMA {
-            window: args.window,
-        }),
-        TransformKind::Ema if (0.0..=1.0).contains(&args.ema_alpha) && args.ema_alpha > 0.0 => {
-            Ok(Transform::EMA {
-                alpha: args.ema_alpha,
-            })
+        TransformKind::None if args.window.is_none() && args.ema_alpha.is_none() => {
+            Ok((Transform::None, "{}".to_string()))
         }
-        TransformKind::Zscore if args.window > 0 => Ok(Transform::ZScore {
-            window: args.window,
-        }),
+        TransformKind::None => {
+            Err("--window and --ema-alpha are not applicable to transform none".to_string())
+        }
+        TransformKind::Sma | TransformKind::Zscore if args.ema_alpha.is_some() => {
+            Err("--ema-alpha is only applicable to the ema transform".to_string())
+        }
         TransformKind::Sma | TransformKind::Zscore => {
-            Err("--window must be positive for sma and zscore transforms".to_string())
+            let window = args.window.unwrap_or(300);
+            if window == 0 {
+                return Err("--window must be positive for sma and zscore transforms".to_string());
+            }
+            let parameters = format!("{{\"window\":{window}}}");
+            if matches!(&args.transform, TransformKind::Sma) {
+                Ok((Transform::SMA { window }, parameters))
+            } else {
+                Ok((Transform::ZScore { window }, parameters))
+            }
         }
-        TransformKind::Ema => Err("--ema-alpha must be in (0, 1] for ema transforms".to_string()),
+        TransformKind::Ema if args.window.is_some() => {
+            Err("--window is only applicable to sma and zscore transforms".to_string())
+        }
+        TransformKind::Ema => {
+            let alpha = args.ema_alpha.unwrap_or(0.1);
+            if !(0.0..=1.0).contains(&alpha) || alpha == 0.0 {
+                return Err("--ema-alpha must be in (0, 1] for ema transforms".to_string());
+            }
+            Ok((
+                Transform::EMA { alpha },
+                format!("{{\"ema_alpha\":{alpha}}}"),
+            ))
+        }
     }
 }
 
@@ -158,7 +176,62 @@ fn main() -> Result<(), String> {
     if args.tick_size <= 0.0 || args.lot_size <= 0.0 || args.order_qty <= 0.0 {
         return Err("--tick-size, --lot-size, and --order-qty must be positive".to_string());
     }
-    let transform = transform(&args)?;
+    match &args.algo {
+        Algorithm::Baseline
+            if !matches!(&args.transform, TransformKind::None)
+                || args.look_depth_pct.is_some()
+                || args.normalize
+                || args.alpha_scale.is_some()
+                || args.vamp_depth_pct.is_some()
+                || args.target_qty_per_side.is_some() =>
+        {
+            return Err(
+                "baseline requires --transform none and accepts no signal parameters".to_string(),
+            );
+        }
+        Algorithm::ObiStaticAlpha
+            if args.vamp_depth_pct.is_some() || args.target_qty_per_side.is_some() =>
+        {
+            return Err(
+                "obi-static-alpha does not accept VAMP or weighted-depth parameters".to_string(),
+            );
+        }
+        Algorithm::Vamp | Algorithm::VampEffective
+            if args.look_depth_pct.is_some()
+                || args.normalize
+                || args.target_qty_per_side.is_some() =>
+        {
+            return Err(
+                "VAMP algorithms accept only --vamp-depth-pct and --alpha-scale".to_string(),
+            );
+        }
+        Algorithm::WeightedDepth
+            if args.look_depth_pct.is_some() || args.normalize || args.vamp_depth_pct.is_some() =>
+        {
+            return Err(
+                "weighted-depth accepts only --target-qty-per-side and --alpha-scale".to_string(),
+            );
+        }
+        _ => {}
+    }
+    let alpha_scale = args.alpha_scale.unwrap_or(50.0);
+    let look_depth_pct = args.look_depth_pct.unwrap_or(0.02);
+    let vamp_depth_pct = args.vamp_depth_pct.unwrap_or(0.02);
+    let target_qty_per_side = args.target_qty_per_side.unwrap_or(500.0);
+    if !alpha_scale.is_finite()
+        || !look_depth_pct.is_finite()
+        || look_depth_pct <= 0.0
+        || !vamp_depth_pct.is_finite()
+        || vamp_depth_pct <= 0.0
+        || !target_qty_per_side.is_finite()
+        || target_qty_per_side <= 0.0
+    {
+        return Err(
+            "algorithm numeric parameters must be finite and depths/quantities positive"
+                .to_string(),
+        );
+    }
+    let (transform, transform_parameters) = transform(&args)?;
     std::fs::create_dir_all(&args.output_path)
         .map_err(|error| format!("failed to create {}: {error}", args.output_path.display()))?;
 
@@ -207,9 +280,7 @@ fn main() -> Result<(), String> {
     let mut recorder = BacktestRecorder::new(&hbt);
     let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
     let algorithm_name = args.algo.as_str();
-    let transform_name = args.transform.as_str();
-
-    let executed_strategy = match args.algo {
+    let (executed_strategy, executed_transform, executed_parameters) = match args.algo {
         Algorithm::Baseline => {
             gridtrading_with_timing(
                 &mut hbt,
@@ -225,7 +296,7 @@ fn main() -> Result<(), String> {
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            "baseline"
+            ("baseline", "none", "{}".to_string())
         }
         Algorithm::ObiStaticAlpha => {
             grid_obi_static_alpha(
@@ -238,15 +309,22 @@ fn main() -> Result<(), String> {
                 args.skew,
                 args.order_qty,
                 args.max_position,
-                args.look_depth_pct,
+                look_depth_pct,
                 args.normalize,
-                args.alpha_scale,
+                alpha_scale,
                 transform,
                 args.elapse_ns,
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            "obi-static-alpha"
+            (
+                "obi-static-alpha",
+                args.transform.as_str(),
+                format!(
+                    "{{\"look_depth_pct\":{},\"normalize\":{},\"alpha_scale\":{}}}",
+                    look_depth_pct, args.normalize, alpha_scale
+                ),
+            )
         }
         Algorithm::Vamp => {
             grid_vamp_fair(
@@ -259,14 +337,21 @@ fn main() -> Result<(), String> {
                 args.skew,
                 args.order_qty,
                 args.max_position,
-                args.vamp_depth_pct,
+                vamp_depth_pct,
                 transform,
-                args.alpha_scale,
+                alpha_scale,
                 args.elapse_ns,
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            "vamp"
+            (
+                "vamp",
+                args.transform.as_str(),
+                format!(
+                    "{{\"vamp_depth_pct\":{},\"alpha_scale\":{}}}",
+                    vamp_depth_pct, alpha_scale
+                ),
+            )
         }
         Algorithm::VampEffective => {
             grid_vamp_effective_fair(
@@ -279,14 +364,21 @@ fn main() -> Result<(), String> {
                 args.skew,
                 args.order_qty,
                 args.max_position,
-                args.vamp_depth_pct,
+                vamp_depth_pct,
                 transform,
-                args.alpha_scale,
+                alpha_scale,
                 args.elapse_ns,
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            "vamp-effective"
+            (
+                "vamp-effective",
+                args.transform.as_str(),
+                format!(
+                    "{{\"vamp_depth_pct\":{},\"alpha_scale\":{}}}",
+                    vamp_depth_pct, alpha_scale
+                ),
+            )
         }
         Algorithm::WeightedDepth => {
             grid_weighted_depth_fair(
@@ -299,14 +391,21 @@ fn main() -> Result<(), String> {
                 args.skew,
                 args.order_qty,
                 args.max_position,
-                args.target_qty_per_side,
+                target_qty_per_side,
                 transform,
-                args.alpha_scale,
+                alpha_scale,
                 args.elapse_ns,
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            "weighted-depth"
+            (
+                "weighted-depth",
+                args.transform.as_str(),
+                format!(
+                    "{{\"target_qty_per_side\":{},\"alpha_scale\":{}}}",
+                    target_qty_per_side, alpha_scale
+                ),
+            )
         }
     };
     hbt.close()
@@ -323,11 +422,19 @@ fn main() -> Result<(), String> {
             "  \"algorithm\": \"{}\",\n",
             "  \"transform\": \"{}\",\n",
             "  \"executed_strategy\": \"{}\",\n",
+            "  \"executed_parameters\": {},\n",
+            "  \"transform_parameters\": {},\n",
             "  \"elapse_ns\": {},\n",
             "  \"record_every\": {}\n",
             "}}\n"
         ),
-        algorithm_name, transform_name, executed_strategy, args.elapse_ns, args.record_every,
+        algorithm_name,
+        executed_transform,
+        executed_strategy,
+        executed_parameters,
+        transform_parameters,
+        args.elapse_ns,
+        args.record_every,
     );
     std::fs::write(&manifest_path, manifest)
         .map_err(|error| format!("failed to write {}: {error}", manifest_path.display()))?;
