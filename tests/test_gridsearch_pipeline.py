@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import importlib.util
 import json
 import subprocess
@@ -16,12 +17,19 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GRIDSEARCH_PATH = REPO_ROOT / "pipeline" / "5_gridsearch.py"
+SNAPSHOT_PATH = REPO_ROOT / "pipeline" / "3_snapshot.py"
 
 spec = importlib.util.spec_from_file_location("gridsearch", GRIDSEARCH_PATH)
 gridsearch = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = gridsearch
 spec.loader.exec_module(gridsearch)
+
+snapshot_spec = importlib.util.spec_from_file_location("snapshot_pipeline", SNAPSHOT_PATH)
+snapshot_pipeline = importlib.util.module_from_spec(snapshot_spec)
+assert snapshot_spec.loader is not None
+sys.modules[snapshot_spec.name] = snapshot_pipeline
+snapshot_spec.loader.exec_module(snapshot_pipeline)
 
 
 EXCH_EVENT = 1 << 31
@@ -161,17 +169,99 @@ def _write_partition_inputs(config: dict, base_root: Path, dates: tuple[str, ...
     data_directory.mkdir(parents=True, exist_ok=True)
     latency_directory.mkdir(parents=True, exist_ok=True)
     for date in dates:
-        (data_directory / f"SYNTHUSDT_{date}.npz").touch()
-        (latency_directory / f"latency_{date}.npz").touch()
+        timestamp = int(date) * 1_000
+        events = np.array(
+            [
+                (
+                    EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+                    timestamp,
+                    timestamp + 1,
+                    99.0,
+                    10.0,
+                    0,
+                    0,
+                    0.0,
+                ),
+                (
+                    EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+                    timestamp + 10,
+                    timestamp + 11,
+                    101.0,
+                    10.0,
+                    0,
+                    0,
+                    0.0,
+                ),
+            ],
+            dtype=EVENT_DTYPE,
+        )
+        latency = np.array(
+            [
+                (timestamp, timestamp + 1, timestamp + 2, 0),
+                (timestamp + 10, timestamp + 11, timestamp + 12, 0),
+            ],
+            dtype=LATENCY_DTYPE,
+        )
+        np.savez(data_directory / f"SYNTHUSDT_{date}.npz", data=events)
+        np.savez(latency_directory / f"latency_{date}.npz", data=latency)
 
 
-def _write_completed_run(run: object) -> None:
+def _write_snapshot_sidecar(snapshot: Path, as_of_ns: int) -> Path:
+    sidecar = Path(f"{snapshot}.manifest.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "as_of_ns": as_of_ns,
+                "snapshot_sha256": gridsearch._sha256_file(str(snapshot)),
+                "source": "test-fixture",
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return sidecar
+
+
+def _write_snapshot_fixture(snapshot: Path, event_timestamp: int, as_of_ns: int) -> None:
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    rows = np.array(
+        [
+            (
+                EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_SNAPSHOT_EVENT,
+                event_timestamp,
+                event_timestamp,
+                99.0,
+                10.0,
+                0,
+                0,
+                0.0,
+            ),
+            (
+                EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT,
+                event_timestamp,
+                event_timestamp,
+                101.0,
+                10.0,
+                0,
+                0,
+                0.0,
+            ),
+        ],
+        dtype=EVENT_DTYPE,
+    )
+    np.savez(snapshot, data=rows)
+    _write_snapshot_sidecar(snapshot, as_of_ns)
+
+
+def _write_completed_run(run: object, end_balance: float = 0.0) -> None:
     output = Path(gridsearch._expected_result_csv(run))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         "timestamp,balance,position,price,fee\n"
         "100,0,0,100,0\n"
-        "200,0,0,100,0\n",
+        f"200,{end_balance},0,100,0\n",
         encoding="utf-8",
     )
     Path(gridsearch._rust_manifest_path(run)).write_text(
@@ -350,7 +440,10 @@ class GridsearchPipelineTests(unittest.TestCase):
                 / "SYNTHUSDT"
                 / "latency_20250102.npz"
             )
-            validation_latency.write_bytes(b"changed")
+            with np.load(validation_latency) as archive:
+                changed_latency = archive["data"].copy()
+            changed_latency[0]["resp_ts"] += 1
+            np.savez(validation_latency, data=changed_latency)
             with self.assertRaisesRegex(ValueError, "input_manifest does not match"):
                 gridsearch._build_runs(config, phase_mode="test")
 
@@ -457,7 +550,7 @@ class GridsearchPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"latency dates \['20250102'\]"):
                 gridsearch._build_runs(config, phase_mode="explore")
 
-            missing_latency.touch()
+            _write_partition_inputs(config, base_root, ("20250102",))
             config["initial_snapshot"] = "{base_root}/snapshots/{symbol}_{date}.npz"
             with self.assertRaisesRegex(ValueError, "configured initial snapshot does not exist"):
                 gridsearch._build_runs(config, phase_mode="explore")
@@ -465,10 +558,243 @@ class GridsearchPipelineTests(unittest.TestCase):
             invalid_snapshot = base_root / "snapshots" / "SYNTHUSDT_20250101.npz"
             invalid_snapshot.parent.mkdir(parents=True, exist_ok=True)
             np.savez(invalid_snapshot, data=np.array([1, 2, 3]))
-            with self.assertRaisesRegex(ValueError, "pinned 64-byte event schema"):
+            with self.assertRaisesRegex(ValueError, "expected pinned dtype"):
                 gridsearch._build_runs(config, phase_mode="explore")
 
+            first_train_event = int("20250101") * 1_000 + 1
+            _write_snapshot_fixture(
+                invalid_snapshot,
+                event_timestamp=first_train_event - 100,
+                as_of_ns=first_train_event,
+            )
+            with self.assertRaisesRegex(ValueError, "earlier than the first replay event"):
+                gridsearch._build_runs(config, phase_mode="explore")
+
+            _write_snapshot_fixture(
+                invalid_snapshot,
+                event_timestamp=first_train_event - 100,
+                as_of_ns=first_train_event - 1,
+            )
+            validation_snapshot = base_root / "snapshots" / "SYNTHUSDT_20250102.npz"
+            first_validation_event = int("20250102") * 1_000 + 1
+            _write_snapshot_fixture(
+                validation_snapshot,
+                event_timestamp=first_validation_event - 100,
+                as_of_ns=first_validation_event - 1,
+            )
+            runs = gridsearch._build_runs(config, phase_mode="explore")
+            self.assertTrue(runs)
+
+    def test_snapshot_generator_writes_verified_as_of_sidecar(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            source = directory / "source.npz"
+            snapshot = directory / "snapshot.npz"
+            source_events = np.array(
+                [
+                    (
+                        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+                        100,
+                        101,
+                        99.0,
+                        10.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                    (
+                        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+                        199,
+                        200,
+                        101.0,
+                        10.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                ],
+                dtype=EVENT_DTYPE,
+            )
+            snapshot_events = np.array(
+                [
+                    (
+                        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_SNAPSHOT_EVENT,
+                        200,
+                        200,
+                        99.0,
+                        10.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                    (
+                        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT,
+                        200,
+                        200,
+                        101.0,
+                        10.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                ],
+                dtype=EVENT_DTYPE,
+            )
+            np.savez(source, data=source_events)
+            np.savez(snapshot, data=snapshot_events)
+
+            snapshot_pipeline._write_snapshot_manifest(str(snapshot), [str(source)])
+            sidecar = Path(f"{snapshot}.manifest.json")
+            manifest = json.loads(sidecar.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["as_of_ns"], 200)
+            self.assertEqual(manifest["snapshot_sha256"], gridsearch._sha256_file(str(snapshot)))
+            self.assertEqual(manifest["source"], "generated-eod")
+            gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+
+            np.savez(snapshot, data=snapshot_events[:1])
+            with self.assertRaisesRegex(ValueError, "snapshot_sha256 does not match"):
+                gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+
+    def test_runtime_npz_and_empty_results_fail_closed_through_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = copy.deepcopy(self.config)
+            base_root = Path(tmpdir)
+            config["base_root"] = str(base_root)
+            config["out_path"] = str(base_root / "out")
+            config_path = base_root / "gridsearch.yaml"
+            data_path = (
+                base_root
+                / "data"
+                / config["exchange"]
+                / "SYNTHUSDT"
+                / "SYNTHUSDT_20250101.npz"
+            )
+            latency_path = (
+                base_root
+                / "latency"
+                / config["exchange"]
+                / "SYNTHUSDT"
+                / "latency_20250101.npz"
+            )
+
+            def invoke() -> int:
+                config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+                with mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "5_gridsearch.py",
+                        "--phase",
+                        "explore",
+                        "--no-plots",
+                        "-c",
+                        str(config_path),
+                    ],
+                ):
+                    return gridsearch.main()
+
+            for case, expected in (
+                ("dtype", "expected pinned dtype"),
+                ("flags", "unsupported event flags"),
+                ("price", "depth prices must be finite and positive"),
+                ("quantity", "depth quantities must be finite and positive"),
+                ("nonfinite_price", "depth prices must be finite and positive"),
+                ("event_time", "local_ts precedes exch_ts"),
+                ("latency_time", "req_ts <= exch_ts <= resp_ts"),
+            ):
+                with self.subTest(case=case):
+                    _write_partition_inputs(config, base_root, ("20250101", "20250102"))
+                    if case == "dtype":
+                        np.savez(data_path, data=np.array([1, 2, 3]))
+                    elif case == "latency_time":
+                        with np.load(latency_path) as archive:
+                            latency = archive["data"].copy()
+                        latency[0]["resp_ts"] = latency[0]["req_ts"] - 1
+                        np.savez(latency_path, data=latency)
+                    else:
+                        with np.load(data_path) as archive:
+                            events = archive["data"].copy()
+                        if case == "flags":
+                            events[0]["ev"] = 0
+                        elif case == "price":
+                            events[0]["px"] = -1.0
+                        elif case == "quantity":
+                            events[0]["qty"] = 0.0
+                        elif case == "nonfinite_price":
+                            events[0]["px"] = np.nan
+                        else:
+                            events[0]["local_ts"] = events[0]["exch_ts"] - 1
+                        np.savez(data_path, data=events)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        invoke()
+
+            _write_partition_inputs(config, base_root, ("20250101", "20250102"))
+            config["gridsearch"]["skip_existing"] = True
+            runs = gridsearch._build_runs(config, phase_mode="explore")
+            run = runs[0]
+            result = Path(gridsearch._expected_result_csv(run))
+            result.parent.mkdir(parents=True, exist_ok=True)
+            Path(gridsearch._rust_manifest_path(run)).write_text(
+                json.dumps(gridsearch._expected_rust_manifest(run), sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            for case, contents, expected in (
+                (
+                    "empty",
+                    "timestamp,balance,position,price,fee\n",
+                    "contains no observations",
+                ),
+                (
+                    "reversed_timestamp",
+                    "timestamp,balance,position,price,fee\n200,0,0,100,0\n100,0,0,100,0\n",
+                    "timestamps must be non-negative and monotonic",
+                ),
+                (
+                    "nonfinite_equity",
+                    "timestamp,balance,position,price,fee\n100,nan,0,100,0\n",
+                    "non-finite value",
+                ),
+            ):
+                with self.subTest(case=case):
+                    result.write_text(contents, encoding="utf-8")
+                    Path(gridsearch._artifact_manifest_path(run)).write_text(
+                        "{}\n", encoding="utf-8"
+                    )
+                    with self.assertRaisesRegex(ValueError, expected):
+                        invoke()
+
+            result.write_text("timestamp,balance,position,price,fee\n", encoding="utf-8")
+            summary = gridsearch._summarize(
+                config["out_path"],
+                [run],
+                make_plots=False,
+                usd_per_order=100.0,
+                return_codes={run.name: 0},
+            )
+            self.assertEqual(summary.iloc[0]["status"], "invalid_artifact")
+            self.assertIn("contains no observations", summary.iloc[0]["artifact_error"])
+
     def test_algorithm_parameter_schema_and_output_names_are_strict(self) -> None:
+        normalized = gridsearch._normalize_algorithm(
+            {"name": "vamp", "params": {"alpha_scale": "25.0"}}
+        )
+        self.assertEqual(normalized["params"]["alpha_scale"], 25.0)
+        self.assertIsInstance(normalized["params"]["alpha_scale"], float)
+
+        unsupported_mode = copy.deepcopy(self.config)
+        unsupported_mode["gridsearch"]["max_position_mode"] = "unsupported-mode"
+        with self.assertRaisesRegex(ValueError, "max_position_mode"):
+            gridsearch._build_runs(unsupported_mode, phase_mode="explore")
+        decorative_field = copy.deepcopy(self.config)
+        decorative_field["gridsearch"]["random_seed"] = 7
+        with self.assertRaisesRegex(ValueError, "Unsupported gridsearch configuration fields"):
+            gridsearch._build_runs(decorative_field, phase_mode="explore")
+        legacy_field = copy.deepcopy(self.config)
+        legacy_field["date_from"] = 20250101
+        with self.assertRaisesRegex(ValueError, "Unsupported top-level configuration fields"):
+            gridsearch._build_runs(legacy_field, phase_mode="explore")
+
         with self.assertRaisesRegex(ValueError, "baseline requires transform=none"):
             gridsearch._build_cmd(
                 "binary", "name", "out", ["data.npz"], ["latency.npz"],
@@ -547,6 +873,49 @@ class GridsearchPipelineTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(ValueError, "refused stale or mismatched"):
                     gridsearch.main()
+
+    def test_candidate_order_is_neutral_and_stale_test_summary_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = copy.deepcopy(self.config)
+            base_root = Path(tmpdir)
+            config["base_root"] = str(base_root)
+            config["out_path"] = str(base_root / "out")
+            _write_partition_inputs(config, base_root, ("20250101", "20250102"))
+            runs = gridsearch._build_runs(config, phase_mode="explore")
+            validation_runs = sorted(
+                (run for run in runs if run.phase == "validation"),
+                key=lambda run: run.candidate_id,
+            )
+            self.assertEqual(len(validation_runs), 2)
+            for run in runs:
+                end_balance = 100.0 if run is validation_runs[1] else 0.0
+                _write_completed_run(run, end_balance=end_balance)
+            gridsearch._summarize(
+                config["out_path"],
+                runs,
+                make_plots=False,
+                usd_per_order=100.0,
+                return_codes={run.name: 0 for run in runs},
+            )
+            validation_summary = Path(config["out_path"]) / "gridsearch_validation_summary.csv"
+            with validation_summary.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                [row["candidate_id"] for row in rows],
+                [run.candidate_id for run in validation_runs],
+            )
+            self.assertLess(float(rows[0]["ret_abs"]), float(rows[1]["ret_abs"]))
+
+            stale_test = Path(config["out_path"]) / "gridsearch_test_summary.csv"
+            stale_test.write_text("candidate_id,status\nstale,ok\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "refused an existing"):
+                gridsearch._summarize(
+                    config["out_path"],
+                    runs,
+                    make_plots=False,
+                    usd_per_order=100.0,
+                    return_codes={run.name: 0 for run in runs},
+                )
 
     def test_unknown_algorithm_and_transform_are_rejected(self) -> None:
         command = gridsearch._build_cmd(

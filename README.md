@@ -52,15 +52,29 @@ The output is a reproducible simulation artifact, not investment performance and
 The numbered `pipeline/` conversion and latency scripts are kept only as optional, user-run research scaffolding for self-supplied data under the user's own vendor terms. Current repository evidence demonstrates Tardis conversion and Binance Futures metadata/data paths. Do **not** treat the repository as verified general Binance or OKX production integration.
 
 The optional grid search uses the pinned upstream HftBacktest APIs and requires `.npz` market-data,
-latency, and (when configured) initial-snapshot files in the upstream schema. It does not accept the
-CSV fixture; use the synthetic quick start for that workflow. Its Python analysis dependencies are
-isolated from the default installation:
+latency, and (when configured) initial-snapshot files in the exact pinned upstream schema. Before
+launching Rust, it rejects empty arrays, unknown event flags, invalid sides, non-finite or non-positive
+depth prices or quantities, non-monotonic timestamps, `local_ts < exch_ts`, and invalid
+request/exchange/response latency ordering. It does not accept the CSV fixture; use the synthetic
+quick start for that workflow. Its Python analysis dependencies are isolated from the default
+installation:
 
 ```bash
 python -m pip install -r requirements-research.txt
 cargo build --release --example gridtrading_backtest_args
 python pipeline/5_gridsearch.py --phase explore -c pipeline/gridsearch_config.yaml
 ```
+
+When `initial_snapshot` is configured, each snapshot must have a JSON sidecar named
+`<snapshot>.manifest.json`. `pipeline/3_snapshot.py` writes this sidecar automatically with:
+
+```json
+{"as_of_ns": 1735689599999999999, "schema_version": 1, "snapshot_sha256": "<sha256>", "source": "generated-eod"}
+```
+
+The grid search verifies the sidecar hash, requires `as_of_ns` to cover every event stored in the
+snapshot, and requires it to be strictly earlier than the first replay event. This prevents a
+same-period or future snapshot from introducing lookahead.
 
 The explore phase runs train and validation only and writes
 `gridsearch_validation_summary.csv`; it never reads or executes the test partition. After reviewing
@@ -73,8 +87,13 @@ python pipeline/5_gridsearch.py --phase test -c pipeline/gridsearch_config.yaml
 
 The test command refuses to run without the persisted validation summary and a successful matching
 candidate. The template deliberately leaves the lock as `TODO(Dennis)`; the pipeline does not
-select a candidate or run validation and test concurrently. Each successful research CLI run also
-writes a Rust execution manifest and a grid-search artifact manifest. The held-out lock verifies
+select a candidate or run validation and test concurrently. Phase summaries remain in stable
+`symbol`, `candidate_id` order and never rank or recommend candidates by return. Explore mode also
+refuses a stale `gridsearch_test_summary.csv` in the output directory, so held-out output cannot be
+silently mixed into a later exploration run. Each successful research CLI run also writes a Rust
+execution manifest and a grid-search artifact manifest. Result artifacts are accepted only when
+they contain observations with the required numeric columns, monotonic timestamps, finite equity,
+and positive prices. The held-out lock verifies
 the candidate's strategy, fees, queue model, timing, engine source and binary identity, declared
 partition plan, validation inputs, and exact validation artifacts before test execution. Retain the
 validation inputs and artifacts until the held-out test is complete. `--skip-existing` resumes only
@@ -105,7 +124,7 @@ The supported public example is intentionally narrow:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
-python -m py_compile pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
+python -m py_compile pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
 python -m unittest discover -s tests -p 'test_*.py'
 python pipeline/4_backtest.py -c pipeline/backtest_config.yaml
 ```

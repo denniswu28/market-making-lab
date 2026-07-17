@@ -42,16 +42,52 @@ TRANSFORM_PARAMETER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "ema": {"ema_alpha": 0.1},
     "zscore": {"window": 300},
 }
-EVENT_DTYPE_FIELDS = (
-    "ev",
-    "exch_ts",
-    "local_ts",
-    "px",
-    "qty",
-    "order_id",
-    "ival",
-    "fval",
-)
+EVENT_KINDS = {1, 2, 3, 4, 5, 10, 11, 12, 13}
+DEPTH_KINDS = {1, 4, 5}
+EVENT_KIND_MASK = 0xFF
+EXCH_EVENT = 1 << 31
+LOCAL_EVENT = 1 << 30
+BUY_EVENT = 1 << 29
+SELL_EVENT = 1 << 28
+ALLOWED_EVENT_BITS = EVENT_KIND_MASK | EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | SELL_EVENT
+ROOT_CONFIG_FIELDS = {
+    "base_root",
+    "exchange",
+    "symbols",
+    "initial_snapshot",
+    "binary",
+    "num_proc",
+    "fees",
+    "queue_power",
+    "defaults",
+    "tickers_json",
+    "elapse_ns",
+    "record_every",
+    "rust_log",
+    "rust_backtrace",
+    "grid",
+    "algo",
+    "transform",
+    "out_path",
+    "gridsearch",
+    "delete_inputs_after",
+}
+GRIDSEARCH_CONFIG_FIELDS = {
+    "symbols",
+    "rel_half_spread",
+    "grid_num",
+    "relative_grid_interval",
+    "skew_mode",
+    "skew_fixed_value",
+    "max_position_mode",
+    "algo_params",
+    "transform",
+    "skip_existing",
+    "train_dates",
+    "validation_dates",
+    "test_dates",
+    "locked_candidate",
+}
 
 # --------------------------- helpers: dates, files, params ---------------------------
 
@@ -155,6 +191,59 @@ def _manifest(value: Dict[str, Any]) -> Tuple[str, str]:
     return encoded, _sha256_text(encoded)
 
 
+def _validate_config_schema(cfg: Dict[str, Any]) -> None:
+    if not isinstance(cfg, dict):
+        raise ValueError("grid-search configuration must be a mapping")
+    unknown_root = set(cfg) - ROOT_CONFIG_FIELDS
+    if unknown_root:
+        raise ValueError(f"Unsupported top-level configuration fields: {sorted(unknown_root)}")
+    required_root = {
+        "base_root",
+        "exchange",
+        "symbols",
+        "binary",
+        "fees",
+        "defaults",
+        "tickers_json",
+        "grid",
+        "algo",
+        "transform",
+        "out_path",
+        "gridsearch",
+    }
+    missing_root = required_root - set(cfg)
+    if missing_root:
+        raise ValueError(f"Missing required configuration fields: {sorted(missing_root)}")
+    if cfg.get("delete_inputs_after", False) is not False:
+        raise ValueError("delete_inputs_after must remain false for the public research workflow")
+    gridsearch = cfg["gridsearch"]
+    if not isinstance(gridsearch, dict):
+        raise ValueError("gridsearch must be a mapping")
+    unknown_gridsearch = set(gridsearch) - GRIDSEARCH_CONFIG_FIELDS
+    if unknown_gridsearch:
+        raise ValueError(
+            f"Unsupported gridsearch configuration fields: {sorted(unknown_gridsearch)}"
+        )
+    skew_mode = gridsearch.get("skew_mode", "rel_over_n")
+    if skew_mode not in {"rel_over_n", "fixed"}:
+        raise ValueError("gridsearch.skew_mode must be 'rel_over_n' or 'fixed'")
+    max_position_mode = gridsearch.get("max_position_mode", "as_in_config")
+    if max_position_mode not in {"as_in_config", "equal_to_grid_num"}:
+        raise ValueError(
+            "gridsearch.max_position_mode must be 'as_in_config' or 'equal_to_grid_num'"
+        )
+    relative_grid_interval = gridsearch.get("relative_grid_interval", "same")
+    if isinstance(relative_grid_interval, str) and relative_grid_interval.lower() != "same":
+        raise ValueError("gridsearch.relative_grid_interval string value must be 'same'")
+    nproc = int(cfg.get("num_proc", 4))
+    if nproc <= 0:
+        raise ValueError("num_proc must be positive")
+    if int(cfg.get("elapse_ns", 1_000_000_000)) <= 0:
+        raise ValueError("elapse_ns must be positive")
+    if int(cfg.get("record_every", 1)) <= 0:
+        raise ValueError("record_every must be positive")
+
+
 def _normalize_algorithm(algo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     unknown_top_level = set(algo_cfg) - {"name", "params"}
     if unknown_top_level:
@@ -175,10 +264,18 @@ def _normalize_algorithm(algo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     params = {**ALGORITHM_PARAMETER_DEFAULTS[name], **supplied}
     if "normalize" in params and not isinstance(params["normalize"], bool):
         raise ValueError(f"{name}.normalize must be a boolean")
+    for key in ("look_depth_pct", "vamp_depth_pct", "target_qty_per_side", "alpha_scale"):
+        if key in params:
+            if isinstance(params[key], bool):
+                raise ValueError(f"{name}.{key} must be numeric")
+            try:
+                params[key] = float(params[key])
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"{name}.{key} must be numeric") from error
     for key in ("look_depth_pct", "vamp_depth_pct", "target_qty_per_side"):
-        if key in params and (not math.isfinite(float(params[key])) or float(params[key]) <= 0):
+        if key in params and (not math.isfinite(params[key]) or params[key] <= 0):
             raise ValueError(f"{name}.{key} must be positive and finite")
-    if "alpha_scale" in params and not math.isfinite(float(params["alpha_scale"])):
+    if "alpha_scale" in params and not math.isfinite(params["alpha_scale"]):
         raise ValueError(f"{name}.alpha_scale must be finite")
     return {"name": name, "params": params}
 
@@ -314,31 +411,189 @@ def _snapshot_path(cfg: Dict[str, Any], symbol: str, first_date_yyyymmdd: str) -
     raise ValueError("initial_snapshot must be null, a path template, or a symbol-to-template map")
 
 
-def _validate_snapshot_file(path: str) -> None:
+def _load_npz_array(path: str, label: str, expected_dtype: Any) -> Any:
     if not os.path.isfile(path):
-        raise ValueError(f"configured initial snapshot does not exist: {path}")
+        raise ValueError(f"configured {label} does not exist: {path}")
     try:
         import numpy as np
 
         with np.load(path, allow_pickle=False) as archive:
             if "data" not in archive:
                 raise ValueError("missing data array")
-            snapshot = archive["data"]
-    except (OSError, ValueError, KeyError) as error:
-        raise ValueError(f"invalid HftBacktest initial snapshot {path}: {error}") from error
-    if snapshot.ndim != 1 or snapshot.size == 0:
-        raise ValueError(f"invalid HftBacktest initial snapshot {path}: expected a non-empty 1D array")
-    if snapshot.dtype.names != EVENT_DTYPE_FIELDS or snapshot.dtype.itemsize != 64:
+            array = archive["data"]
+    except (OSError, ValueError, KeyError, EOFError) as error:
+        raise ValueError(f"invalid HftBacktest {label} {path}: {error}") from error
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"invalid HftBacktest {label} {path}: expected a non-empty 1D array")
+    if array.dtype != expected_dtype:
         raise ValueError(
-            f"invalid HftBacktest initial snapshot {path}: expected the pinned 64-byte event schema"
+            f"invalid HftBacktest {label} {path}: expected pinned dtype {expected_dtype.descr} "
+            f"with item size {expected_dtype.itemsize}"
         )
+    return array
 
 
-def _resolve_initial_snapshot(cfg: Dict[str, Any], symbol: str, first_date_yyyymmdd: str) -> Optional[str]:
+def _event_dtype(np: Any) -> Any:
+    return np.dtype(
+        [
+            ("ev", "<u8"),
+            ("exch_ts", "<i8"),
+            ("local_ts", "<i8"),
+            ("px", "<f8"),
+            ("qty", "<f8"),
+            ("order_id", "<u8"),
+            ("ival", "<i8"),
+            ("fval", "<f8"),
+        ],
+        align=True,
+    )
+
+
+def _latency_dtype(np: Any) -> Any:
+    return np.dtype(
+        [
+            ("req_ts", "<i8"),
+            ("exch_ts", "<i8"),
+            ("resp_ts", "<i8"),
+            ("_padding", "<i8"),
+        ],
+        align=True,
+    )
+
+
+def _validate_event_file(path: str, label: str = "market-data file") -> Dict[str, int]:
+    import numpy as np
+
+    events = _load_npz_array(path, label, _event_dtype(np))
+    flags = events["ev"]
+    kinds = flags & np.uint64(EVENT_KIND_MASK)
+    unknown_bits = flags & np.uint64((~ALLOWED_EVENT_BITS) & ((1 << 64) - 1))
+    if np.any(unknown_bits != 0) or not np.all(np.isin(kinds, list(EVENT_KINDS))):
+        raise ValueError(f"invalid HftBacktest {label} {path}: unsupported event flags")
+    locations = flags & np.uint64(EXCH_EVENT | LOCAL_EVENT)
+    if np.any(locations == 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: every event needs a location flag")
+    sides = flags & np.uint64(BUY_EVENT | SELL_EVENT)
+    if np.any(sides == np.uint64(BUY_EVENT | SELL_EVENT)):
+        raise ValueError(f"invalid HftBacktest {label} {path}: event cannot be both buy and sell")
+    depth_rows = np.isin(kinds, list(DEPTH_KINDS))
+    if np.any(depth_rows & (sides == 0)):
+        raise ValueError(f"invalid HftBacktest {label} {path}: depth events require one side")
+
+    exch_ts = events["exch_ts"]
+    local_ts = events["local_ts"]
+    if np.any(exch_ts < 0) or np.any(local_ts < 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: timestamps must be non-negative")
+    if np.any(local_ts < exch_ts):
+        raise ValueError(f"invalid HftBacktest {label} {path}: local_ts precedes exch_ts")
+    if np.any(np.diff(exch_ts) < 0) or np.any(np.diff(local_ts) < 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: timestamps are not monotonic")
+
+    prices = events["px"][depth_rows]
+    quantities = events["qty"][depth_rows]
+    if np.any(~np.isfinite(prices)) or np.any(prices <= 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: depth prices must be finite and positive")
+    if np.any(~np.isfinite(quantities)) or np.any(quantities <= 0):
+        raise ValueError(
+            f"invalid HftBacktest {label} {path}: depth quantities must be finite and positive"
+        )
+    return {
+        "first_exch_ts": int(exch_ts[0]),
+        "last_exch_ts": int(exch_ts[-1]),
+        "first_local_ts": int(local_ts[0]),
+        "last_local_ts": int(local_ts[-1]),
+        "rows": int(events.size),
+    }
+
+
+def _validate_latency_file(path: str) -> Dict[str, int]:
+    import numpy as np
+
+    latency = _load_npz_array(path, "latency file", _latency_dtype(np))
+    request = latency["req_ts"]
+    exchange = latency["exch_ts"]
+    response = latency["resp_ts"]
+    if np.any(request < 0) or np.any(request > exchange) or np.any(exchange > response):
+        raise ValueError(
+            f"invalid HftBacktest latency file {path}: require 0 <= req_ts <= exch_ts <= resp_ts"
+        )
+    if (
+        np.any(np.diff(request) < 0)
+        or np.any(np.diff(exchange) < 0)
+        or np.any(np.diff(response) < 0)
+    ):
+        raise ValueError(f"invalid HftBacktest latency file {path}: timestamps are not monotonic")
+    return {
+        "first_req_ts": int(request[0]),
+        "last_resp_ts": int(response[-1]),
+        "rows": int(latency.size),
+    }
+
+
+def _validate_partition_inputs(data_files: List[str], latency_files: List[str]) -> int:
+    previous_data_end: Optional[int] = None
+    previous_latency_end: Optional[int] = None
+    first_replay_ts: Optional[int] = None
+    for data_path, latency_path in zip(data_files, latency_files, strict=True):
+        event_info = _validate_event_file(data_path)
+        latency_info = _validate_latency_file(latency_path)
+        if previous_data_end is not None and event_info["first_local_ts"] < previous_data_end:
+            raise ValueError("market-data files are not monotonic across configured dates")
+        if previous_latency_end is not None and latency_info["first_req_ts"] < previous_latency_end:
+            raise ValueError("latency files are not monotonic across configured dates")
+        previous_data_end = event_info["last_local_ts"]
+        previous_latency_end = latency_info["last_resp_ts"]
+        if first_replay_ts is None:
+            first_replay_ts = event_info["first_local_ts"]
+    assert first_replay_ts is not None
+    return first_replay_ts
+
+
+def _snapshot_manifest_path(path: str) -> str:
+    return f"{path}.manifest.json"
+
+
+def _validate_snapshot_file(path: str, first_replay_ts: int) -> Dict[str, Any]:
+    event_info = _validate_event_file(path, label="initial snapshot")
+    manifest_path = _snapshot_manifest_path(path)
+    if not os.path.isfile(manifest_path):
+        raise ValueError(f"initial snapshot requires sidecar manifest: {manifest_path}")
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid initial snapshot sidecar manifest: {manifest_path}") from error
+    if not isinstance(manifest, dict):
+        raise ValueError("initial snapshot sidecar manifest must be a JSON object")
+    unknown = set(manifest) - {"schema_version", "as_of_ns", "snapshot_sha256", "source"}
+    if unknown:
+        raise ValueError(f"Unsupported initial snapshot manifest fields: {sorted(unknown)}")
+    if manifest.get("schema_version") != 1:
+        raise ValueError("initial snapshot manifest schema_version must equal 1")
+    as_of_ns = manifest.get("as_of_ns")
+    if isinstance(as_of_ns, bool) or not isinstance(as_of_ns, int):
+        raise ValueError("initial snapshot manifest as_of_ns must be an integer")
+    if as_of_ns < event_info["last_local_ts"]:
+        raise ValueError("initial snapshot as_of_ns precedes a timestamp stored in the snapshot")
+    if as_of_ns >= first_replay_ts:
+        raise ValueError("initial snapshot as_of_ns must be earlier than the first replay event")
+    if manifest.get("snapshot_sha256") != _sha256_file(path):
+        raise ValueError("initial snapshot manifest snapshot_sha256 does not match the snapshot")
+    if "source" in manifest and not isinstance(manifest["source"], str):
+        raise ValueError("initial snapshot manifest source must be a string when provided")
+    return {
+        "manifest": manifest,
+        "manifest_file": _file_identity(manifest_path),
+    }
+
+
+def _resolve_initial_snapshot(
+    cfg: Dict[str, Any], symbol: str, first_date_yyyymmdd: str, first_replay_ts: int
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     path = _snapshot_path(cfg, symbol, first_date_yyyymmdd)
     if path is not None:
-        _validate_snapshot_file(path)
-    return path
+        return path, _validate_snapshot_file(path, first_replay_ts)
+    return None, None
 
 
 def _partition_manifest(cfg: Dict[str, Any], symbol: str) -> Dict[str, Any]:
@@ -357,7 +612,12 @@ def _partition_manifest(cfg: Dict[str, Any], symbol: str) -> Dict[str, Any]:
                 for date in dates
             ],
             "initial_snapshot": (
-                os.path.abspath(_snapshot_path(cfg, symbol, dates[0])).replace("\\", "/")
+                {
+                    "path": os.path.abspath(_snapshot_path(cfg, symbol, dates[0])).replace("\\", "/"),
+                    "manifest_path": os.path.abspath(
+                        _snapshot_manifest_path(_snapshot_path(cfg, symbol, dates[0]))
+                    ).replace("\\", "/"),
+                }
                 if _snapshot_path(cfg, symbol, dates[0]) is not None
                 else None
             ),
@@ -376,6 +636,7 @@ def _input_manifest(
     data_files: List[str],
     latency_files: List[str],
     initial_snapshot: Optional[str],
+    snapshot_metadata: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     return {
         "schema_version": 1,
@@ -383,7 +644,11 @@ def _input_manifest(
         "symbol": symbol,
         "data_files": [_file_identity(path) for path in data_files],
         "latency_files": [_file_identity(path) for path in latency_files],
-        "initial_snapshot": _file_identity(initial_snapshot) if initial_snapshot else None,
+        "initial_snapshot": (
+            {"snapshot_file": _file_identity(initial_snapshot), **(snapshot_metadata or {})}
+            if initial_snapshot
+            else None
+        ),
     }
 
 def _read_result_csv(path: str) -> pd.DataFrame:
@@ -707,6 +972,7 @@ def _validate_locked_validation(out_path: str, expected: RunSpec) -> None:
 def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpec]:
     if phase_mode not in ("explore", "test"):
         raise ValueError("phase_mode must be 'explore' or 'test'")
+    _validate_config_schema(cfg)
     base = cfg["base_root"]
     exch = cfg["exchange"]
     requested_phases = (
@@ -797,13 +1063,23 @@ def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpe
             base_params = _symbol_base_grid(sym, tickers, cfg)
             files = [_files_for(base, exch, sym, d) for d in dates]
             data_files, latency_files = _required_partition_files(files, phase, sym)
+            first_replay_ts = _validate_partition_inputs(data_files, latency_files)
 
-            init_snap = _resolve_initial_snapshot(cfg, sym, dates[0])
+            init_snap, snapshot_metadata = _resolve_initial_snapshot(
+                cfg, sym, dates[0], first_replay_ts
+            )
             partition_manifest_json, partition_manifest_sha256 = _manifest(
                 _partition_manifest(cfg, sym)
             )
             input_manifest_json, input_manifest_sha256 = _manifest(
-                _input_manifest(phase, sym, data_files, latency_files, init_snap)
+                _input_manifest(
+                    phase,
+                    sym,
+                    data_files,
+                    latency_files,
+                    init_snap,
+                    snapshot_metadata,
+                )
             )
 
             for combo in _param_grid_iter(param_grid):
@@ -999,6 +1275,62 @@ def _load_rust_manifest(spec: RunSpec) -> Dict[str, Any]:
     return manifest
 
 
+def _validate_result_csv(path: str) -> Dict[str, Any]:
+    required = {"timestamp", "balance", "position", "price", "fee"}
+    rows = 0
+    first_timestamp: Optional[int] = None
+    previous_timestamp: Optional[int] = None
+    first_equity: Optional[float] = None
+    last_equity: Optional[float] = None
+    try:
+        with open(path, newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+                raise ValueError(
+                    f"result CSV must contain columns {sorted(required)}"
+                )
+            for row_number, row in enumerate(reader, start=2):
+                try:
+                    timestamp = int(row["timestamp"])
+                    balance = float(row["balance"])
+                    position = float(row["position"])
+                    price = float(row["price"])
+                    fee = float(row["fee"])
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        f"result CSV has a non-numeric value at row {row_number}"
+                    ) from error
+                if timestamp < 0 or (
+                    previous_timestamp is not None and timestamp < previous_timestamp
+                ):
+                    raise ValueError("result CSV timestamps must be non-negative and monotonic")
+                if not all(math.isfinite(value) for value in (balance, position, price, fee)):
+                    raise ValueError(f"result CSV has a non-finite value at row {row_number}")
+                if price <= 0:
+                    raise ValueError(f"result CSV price must be positive at row {row_number}")
+                equity = balance + position * price - fee
+                if not math.isfinite(equity):
+                    raise ValueError(f"result CSV equity is non-finite at row {row_number}")
+                if first_equity is None:
+                    first_equity = equity
+                    first_timestamp = timestamp
+                last_equity = equity
+                previous_timestamp = timestamp
+                rows += 1
+    except OSError as error:
+        raise ValueError(f"could not read result CSV {path}: {error}") from error
+    if rows == 0 or first_equity is None or last_equity is None:
+        raise ValueError("result CSV contains no observations")
+    return {
+        "rows": rows,
+        "first_timestamp": first_timestamp,
+        "last_timestamp": previous_timestamp,
+        "start_equity": first_equity,
+        "end_equity": last_equity,
+        "return_abs": last_equity - first_equity,
+    }
+
+
 def _artifact_manifest_payload(spec: RunSpec) -> Dict[str, Any]:
     result_csv = _expected_result_csv(spec)
     matching_csvs = sorted(glob.glob(os.path.join(spec.out_path, f"{spec.name}*.csv")))
@@ -1006,6 +1338,7 @@ def _artifact_manifest_payload(spec: RunSpec) -> Dict[str, Any]:
         raise ValueError(
             f"expected exactly one HftBacktest result CSV at {result_csv}; found {matching_csvs}"
         )
+    result_validation = _validate_result_csv(result_csv)
     rust_manifest = _load_rust_manifest(spec)
     return {
         "schema_version": 1,
@@ -1020,6 +1353,7 @@ def _artifact_manifest_payload(spec: RunSpec) -> Dict[str, Any]:
         "input_manifest_sha256": spec.input_manifest_sha256,
         "command": _command_for_spec(spec),
         "result_csv": _file_identity(result_csv),
+        "result_validation": result_validation,
         "rust_manifest": rust_manifest,
         "rust_manifest_file": _file_identity(_rust_manifest_path(spec)),
     }
@@ -1076,6 +1410,19 @@ def _run_one(spec: RunSpec) -> Tuple[RunSpec, int]:
 
 # --------------------------- summary / plots ---------------------------
 
+
+def _reject_stale_phase_summaries(out_dir: str, specs: List[RunSpec]) -> None:
+    phases = {spec.phase for spec in specs}
+    stale_test_summary = os.path.join(out_dir, "gridsearch_test_summary.csv")
+    if phases and phases.issubset({"train", "validation"}) and os.path.exists(
+        stale_test_summary
+    ):
+        raise ValueError(
+            "explore mode refused an existing gridsearch_test_summary.csv; use a new output "
+            "directory or manually archive the previous held-out run"
+        )
+
+
 def _summarize(
     out_dir: str,
     specs: List[RunSpec],
@@ -1090,6 +1437,7 @@ def _summarize(
     from matplotlib import pyplot as plt
 
     os.makedirs(out_dir, exist_ok=True)
+    _reject_stale_phase_summaries(out_dir, specs)
     plot_dir = os.path.join(out_dir, "gridsearch_plots")
     if make_plots:
         os.makedirs(plot_dir, exist_ok=True)
@@ -1214,10 +1562,7 @@ def _summarize(
         phase_df = df[df["phase"] == phase]
         if phase_df.empty:
             continue
-        if phase == "test":
-            phase_df = phase_df.sort_values(["symbol", "candidate_id"])
-        else:
-            phase_df = phase_df.sort_values(["symbol", "ret_abs"], ascending=[True, False])
+        phase_df = phase_df.sort_values(["symbol", "candidate_id"])
         out_csv = os.path.join(out_dir, f"gridsearch_{phase}_summary.csv")
         phase_df.to_csv(out_csv, index=False)
         print(f"[summary] wrote {out_csv}")
@@ -1248,11 +1593,13 @@ def main() -> int:
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
+    _validate_config_schema(cfg)
     os.makedirs(cfg["out_path"], exist_ok=True)
     runs = _build_runs(cfg, phase_mode=args.phase)
     if not runs:
         print("[gridsearch] nothing to run.")
         return 0
+    _reject_stale_phase_summaries(cfg["out_path"], runs)
 
     skip_existing = args.skip_existing or bool((cfg.get("gridsearch") or {}).get("skip_existing", False))
     all_runs = list(runs)
