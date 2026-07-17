@@ -59,11 +59,22 @@ isolated from the default installation:
 ```bash
 python -m pip install -r requirements-research.txt
 cargo build --release --example gridtrading_backtest_args
+python pipeline/5_gridsearch.py --phase explore -c pipeline/gridsearch_config.yaml
 ```
 
-Before a test partition can run, set `gridsearch.locked_candidate` to exactly one `candidate_id`
-from the phase-separated validation summary. The template deliberately leaves this as
-`TODO(Dennis)`; the pipeline does not select or rank a held-out candidate automatically.
+The explore phase runs train and validation only and writes
+`gridsearch_validation_summary.csv`; it never reads or executes the test partition. After reviewing
+that file, set `gridsearch.locked_candidate` to exactly one successful validation `candidate_id`,
+then run the held-out evaluation separately:
+
+```bash
+python pipeline/5_gridsearch.py --phase test -c pipeline/gridsearch_config.yaml
+```
+
+The test command refuses to run without the persisted validation summary and a successful matching
+candidate. The template deliberately leaves the lock as `TODO(Dennis)`; the pipeline does not
+select a candidate or run validation and test concurrently. Each successful research CLI run also
+writes a small manifest identifying the strict algorithm/transform dispatch and timing controls.
 
 ## Tested assumptions and limitations
 

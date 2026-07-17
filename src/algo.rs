@@ -1177,9 +1177,50 @@ where
     Ok(())
 }
 
-/// ------------------------------------------------------------
-/// Your original no-alpha grid for completeness (unchanged)
-/// ------------------------------------------------------------
+/// Signal-free grid strategy with caller-controlled stepping and recording cadence.
+pub fn gridtrading_with_timing<MD, I, R>(
+    hbt: &mut I,
+    recorder: &mut R,
+    relative_half_spread: f64,
+    relative_grid_interval: f64,
+    grid_num: usize,
+    min_grid_step: f64,
+    skew: f64,
+    order_qty: f64,
+    max_position: f64,
+    elapse_ns: i64,
+    record_every: usize,
+) -> Result<(), i64>
+where
+    MD: MarketDepth,
+    I: Bot<MD>,
+    <I as Bot<MD>>::Error: std::fmt::Debug,
+    R: Recorder,
+    <R as Recorder>::Error: std::fmt::Debug,
+{
+    run_loop::<I, R, MD, _>(
+        hbt,
+        recorder,
+        elapse_ns,
+        record_every,
+        move |bot| {
+            let d = bot.depth(0);
+            let mid = 0.5 * (d.best_bid() + d.best_ask()) as f64;
+            mid
+        },
+        (
+            &relative_half_spread,
+            &relative_grid_interval,
+            &grid_num,
+            &min_grid_step,
+            &skew,
+            &order_qty,
+            &max_position,
+        ),
+    )
+}
+
+/// Original signal-free grid interface retained with its historical timing defaults.
 pub fn gridtrading<MD, I, R>(
     hbt: &mut I,
     recorder: &mut R,
@@ -1198,24 +1239,17 @@ where
     R: Recorder,
     <R as Recorder>::Error: std::fmt::Debug,
 {
-    run_loop::<I, R, MD, _>(
+    gridtrading_with_timing::<MD, I, R>(
         hbt,
         recorder,
-        100_000_000, // 100ms
-        10,          // record every 1s
-        move |bot| {
-            let d = bot.depth(0);
-            let mid = 0.5 * (d.best_bid() + d.best_ask()) as f64;
-            mid
-        },
-        (
-            &relative_half_spread,
-            &relative_grid_interval,
-            &grid_num,
-            &min_grid_step,
-            &skew,
-            &order_qty,
-            &max_position,
-        ),
+        relative_half_spread,
+        relative_grid_interval,
+        grid_num,
+        min_grid_step,
+        skew,
+        order_qty,
+        max_position,
+        100_000_000,
+        10,
     )
 }

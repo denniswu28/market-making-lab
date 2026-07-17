@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import csv
 import glob
 import hashlib
 import json
@@ -223,7 +224,9 @@ def _build_cmd(
     # algo extras
     name_algo = algo_cfg["name"].lower()
     p = (algo_cfg.get("params") or {})
-    if name_algo == "obi-static-alpha":
+    if name_algo == "baseline":
+        pass
+    elif name_algo == "obi-static-alpha":
         args += [
             "--look-depth-pct", str(p.get("look_depth_pct", 0.02)),
             "--alpha-scale",    str(p.get("alpha_scale", 50.0)),
@@ -346,10 +349,41 @@ def _as_list(v) -> List[Any]:
         return list(v)
     return [v]
 
-def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
+def _successful_validation_candidates(out_path: str) -> set[str]:
+    summary_path = os.path.join(out_path, "gridsearch_validation_summary.csv")
+    if not os.path.exists(summary_path):
+        raise ValueError(
+            "held-out test mode requires gridsearch_validation_summary.csv from a completed "
+            "explore run"
+        )
+    with open(summary_path, newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"candidate_id", "phase", "status"}
+        if reader.fieldnames is None or not required.issubset(reader.fieldnames):
+            raise ValueError(
+                "validation summary must contain candidate_id, phase, and status columns"
+            )
+        successful = {
+            row["candidate_id"]
+            for row in reader
+            if row["phase"] == "validation" and row["status"] == "ok"
+        }
+    if not successful:
+        raise ValueError("validation summary contains no successful validation candidates")
+    return successful
+
+
+def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpec]:
+    if phase_mode not in ("explore", "test"):
+        raise ValueError("phase_mode must be 'explore' or 'test'")
     base = cfg["base_root"]
     exch = cfg["exchange"]
-    partitions = _date_partitions(cfg)
+    requested_phases = {"train", "validation"} if phase_mode == "explore" else {"test"}
+    partitions = [
+        partition
+        for partition in _date_partitions(cfg)
+        if partition[0] in requested_phases
+    ]
 
     with open(cfg["tickers_json"], "r", encoding="utf-8") as f:
         tickers = json.load(f)
@@ -468,7 +502,9 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
                             binary=cfg["binary"],
                         )
                     )
-    validation_candidates = {run.candidate_id for run in runs if run.phase == "validation"}
+    if phase_mode == "explore":
+        return runs
+
     locked = gs.get("locked_candidate")
     if not isinstance(locked, (list, tuple)) or len(locked) != 1 or not isinstance(locked[0], str):
         raise ValueError(
@@ -476,15 +512,20 @@ def _build_runs(cfg: Dict[str, Any]) -> List[RunSpec]:
             "select it after reviewing the validation summary (TODO(Dennis))"
         )
     locked_candidate = locked[0]
-    if locked_candidate not in validation_candidates:
+    if locked_candidate == "TODO(Dennis)":
         raise ValueError(
-            "gridsearch.locked_candidate must match a candidate evaluated on validation; "
-            "select it after reviewing the validation summary (TODO(Dennis))"
+            "replace gridsearch.locked_candidate after reviewing the validation summary "
+            "(TODO(Dennis))"
         )
-    test_runs = [run for run in runs if run.phase == "test" and run.candidate_id == locked_candidate]
+    if locked_candidate not in _successful_validation_candidates(cfg["out_path"]):
+        raise ValueError(
+            "gridsearch.locked_candidate must match a successful candidate in the persisted "
+            "validation summary"
+        )
+    test_runs = [run for run in runs if run.candidate_id == locked_candidate]
     if len(test_runs) != 1:
         raise ValueError("gridsearch.locked_candidate must produce exactly one held-out test run")
-    return [run for run in runs if run.phase != "test"] + test_runs
+    return test_runs
 
 # --------------------------- worker ---------------------------
 
@@ -517,7 +558,13 @@ def _run_one(spec: RunSpec) -> Tuple[RunSpec, int]:
 
 # --------------------------- summary / plots ---------------------------
 
-def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_order: float) -> pd.DataFrame:
+def _summarize(
+    out_dir: str,
+    specs: List[RunSpec],
+    make_plots: bool,
+    usd_per_order: float,
+    return_codes: Optional[Dict[str, int]] = None,
+) -> pd.DataFrame:
     global mdates, np, pd, plt
     import numpy as np
     import pandas as pd
@@ -532,9 +579,11 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
     rows: List[Dict[str, Any]] = []
     for s in specs:
         csv_path = _first_result_csv(out_dir, s.name)
-        if not csv_path or not os.path.exists(csv_path):
+        return_code = (return_codes or {}).get(s.name, 0)
+        if return_code != 0 or not csv_path or not os.path.exists(csv_path):
             rows.append(dict(
-                name=s.name, candidate_id=s.candidate_id, phase=s.phase, symbol=s.symbol, status="missing_csv",
+                name=s.name, candidate_id=s.candidate_id, phase=s.phase, symbol=s.symbol,
+                status="failed" if return_code != 0 else "missing_csv",
                 ret_abs=np.nan, ret_pct=np.nan, start_eq=np.nan, end_eq=np.nan,
                 rel_half_spread=s.grid["relative_half_spread"],
                 relative_grid_interval=s.grid["relative_grid_interval"],
@@ -617,6 +666,8 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
     df = pd.DataFrame(rows)
     for phase in ("train", "validation", "test"):
         phase_df = df[df["phase"] == phase]
+        if phase_df.empty:
+            continue
         if phase == "test":
             phase_df = phase_df.sort_values(["symbol", "candidate_id"])
         else:
@@ -628,7 +679,7 @@ def _summarize(out_dir: str, specs: List[RunSpec], make_plots: bool, usd_per_ord
 
 # --------------------------- CLI ---------------------------
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("-c", "--config", default="pipeline/gridsearch_config.yaml",
                     help="Path to YAML backtest config with 'gridsearch' section.")
@@ -637,16 +688,25 @@ def main():
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip a run if an output CSV already exists.")
     ap.add_argument("--no-plots", action="store_true", help="Disable plot generation.")
+    ap.add_argument(
+        "--phase",
+        choices=("explore", "test"),
+        default="explore",
+        help=(
+            "explore runs train and validation only; test requires one successful candidate "
+            "locked from the persisted validation summary"
+        ),
+    )
     args = ap.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     os.makedirs(cfg["out_path"], exist_ok=True)
-    runs = _build_runs(cfg)
+    runs = _build_runs(cfg, phase_mode=args.phase)
     if not runs:
         print("[gridsearch] nothing to run.")
-        return
+        return 0
 
     skip_existing = args.skip_existing or bool((cfg.get("gridsearch") or {}).get("skip_existing", False))
     if skip_existing:
@@ -669,7 +729,14 @@ def main():
     print(f"[gridsearch] Done. {len(results)-bad} OK / {bad} FAIL")
 
     usd_per_order = float(cfg["grid"].get("order_value_usd", 100.0))
-    _summarize(cfg["out_path"], [s for s, _ in results], make_plots=(not args.no_plots), usd_per_order=usd_per_order)
+    _summarize(
+        cfg["out_path"],
+        [s for s, _ in results],
+        make_plots=(not args.no_plots),
+        usd_per_order=usd_per_order,
+        return_codes={spec.name: return_code for spec, return_code in results},
+    )
+    return 1 if bad else 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

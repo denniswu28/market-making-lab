@@ -15,7 +15,7 @@ use hftbacktest::{
 };
 use statmm::algo::{
     Transform, grid_obi_static_alpha, grid_vamp_effective_fair, grid_vamp_fair,
-    grid_weighted_depth_fair, gridtrading,
+    grid_weighted_depth_fair, gridtrading_with_timing,
 };
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -27,12 +27,35 @@ enum Algorithm {
     WeightedDepth,
 }
 
+impl Algorithm {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::ObiStaticAlpha => "obi-static-alpha",
+            Self::Vamp => "vamp",
+            Self::VampEffective => "vamp-effective",
+            Self::WeightedDepth => "weighted-depth",
+        }
+    }
+}
+
 #[derive(Clone, Debug, ValueEnum)]
 enum TransformKind {
     None,
     Sma,
     Ema,
     Zscore,
+}
+
+impl TransformKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Sma => "sma",
+            Self::Ema => "ema",
+            Self::Zscore => "zscore",
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -183,90 +206,130 @@ fn main() -> Result<(), String> {
         .map_err(|error| format!("failed to build HftBacktest: {error:?}"))?;
     let mut recorder = BacktestRecorder::new(&hbt);
     let min_grid_step = args.min_grid_step.unwrap_or(args.tick_size);
+    let algorithm_name = args.algo.as_str();
+    let transform_name = args.transform.as_str();
 
-    match args.algo {
-        Algorithm::Baseline => gridtrading(
-            &mut hbt,
-            &mut recorder,
-            args.relative_half_spread,
-            args.relative_grid_interval,
-            args.grid_num,
-            min_grid_step,
-            args.skew,
-            args.order_qty,
-            args.max_position,
-        ),
-        Algorithm::ObiStaticAlpha => grid_obi_static_alpha(
-            &mut hbt,
-            &mut recorder,
-            args.relative_half_spread,
-            args.relative_grid_interval,
-            args.grid_num,
-            min_grid_step,
-            args.skew,
-            args.order_qty,
-            args.max_position,
-            args.look_depth_pct,
-            args.normalize,
-            args.alpha_scale,
-            transform,
-            args.elapse_ns,
-            args.record_every,
-        ),
-        Algorithm::Vamp => grid_vamp_fair(
-            &mut hbt,
-            &mut recorder,
-            args.relative_half_spread,
-            args.relative_grid_interval,
-            args.grid_num,
-            min_grid_step,
-            args.skew,
-            args.order_qty,
-            args.max_position,
-            args.vamp_depth_pct,
-            transform,
-            args.alpha_scale,
-            args.elapse_ns,
-            args.record_every,
-        ),
-        Algorithm::VampEffective => grid_vamp_effective_fair(
-            &mut hbt,
-            &mut recorder,
-            args.relative_half_spread,
-            args.relative_grid_interval,
-            args.grid_num,
-            min_grid_step,
-            args.skew,
-            args.order_qty,
-            args.max_position,
-            args.vamp_depth_pct,
-            transform,
-            args.alpha_scale,
-            args.elapse_ns,
-            args.record_every,
-        ),
-        Algorithm::WeightedDepth => grid_weighted_depth_fair(
-            &mut hbt,
-            &mut recorder,
-            args.relative_half_spread,
-            args.relative_grid_interval,
-            args.grid_num,
-            min_grid_step,
-            args.skew,
-            args.order_qty,
-            args.max_position,
-            args.target_qty_per_side,
-            transform,
-            args.alpha_scale,
-            args.elapse_ns,
-            args.record_every,
-        ),
-    }
-    .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+    let executed_strategy = match args.algo {
+        Algorithm::Baseline => {
+            gridtrading_with_timing(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+            "baseline"
+        }
+        Algorithm::ObiStaticAlpha => {
+            grid_obi_static_alpha(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.look_depth_pct,
+                args.normalize,
+                args.alpha_scale,
+                transform,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+            "obi-static-alpha"
+        }
+        Algorithm::Vamp => {
+            grid_vamp_fair(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.vamp_depth_pct,
+                transform,
+                args.alpha_scale,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+            "vamp"
+        }
+        Algorithm::VampEffective => {
+            grid_vamp_effective_fair(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.vamp_depth_pct,
+                transform,
+                args.alpha_scale,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+            "vamp-effective"
+        }
+        Algorithm::WeightedDepth => {
+            grid_weighted_depth_fair(
+                &mut hbt,
+                &mut recorder,
+                args.relative_half_spread,
+                args.relative_grid_interval,
+                args.grid_num,
+                min_grid_step,
+                args.skew,
+                args.order_qty,
+                args.max_position,
+                args.target_qty_per_side,
+                transform,
+                args.alpha_scale,
+                args.elapse_ns,
+                args.record_every,
+            )
+            .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
+            "weighted-depth"
+        }
+    };
     hbt.close()
         .map_err(|error| format!("failed to close HftBacktest: {error:?}"))?;
     recorder
         .to_csv(&args.name, &args.output_path)
         .map_err(|error| format!("failed to write recorder output: {error:?}"))?;
+    let manifest_path = args
+        .output_path
+        .join(format!("{}_run_manifest.json", args.name));
+    let manifest = format!(
+        concat!(
+            "{{\n",
+            "  \"algorithm\": \"{}\",\n",
+            "  \"transform\": \"{}\",\n",
+            "  \"executed_strategy\": \"{}\",\n",
+            "  \"elapse_ns\": {},\n",
+            "  \"record_every\": {}\n",
+            "}}\n"
+        ),
+        algorithm_name, transform_name, executed_strategy, args.elapse_ns, args.record_every,
+    );
+    std::fs::write(&manifest_path, manifest)
+        .map_err(|error| format!("failed to write {}: {error}", manifest_path.display()))?;
     Ok(())
 }

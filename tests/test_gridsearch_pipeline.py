@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import copy
 import importlib.util
-import struct
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
-import zipfile
 from pathlib import Path
 
+import numpy as np
 import yaml
 
 
@@ -23,42 +23,135 @@ sys.modules[spec.name] = gridsearch
 spec.loader.exec_module(gridsearch)
 
 
-def _write_npz(path: Path, rows: list[tuple], descr: str, row_format: str) -> None:
-    header = f"{{'descr': {descr}, 'fortran_order': False, 'shape': ({len(rows)},), }}"
-    header_bytes = header.encode("ascii")
-    header_bytes += b" " * ((64 - ((10 + len(header_bytes) + 1) % 64)) % 64) + b"\n"
-    npy = b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header_bytes)) + header_bytes
-    npy += b"".join(struct.pack(row_format, *row) for row in rows)
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as archive:
-        archive.writestr("data.npy", npy)
+EXCH_EVENT = 1 << 31
+LOCAL_EVENT = 1 << 30
+BUY_EVENT = 1 << 29
+SELL_EVENT = 1 << 28
+DEPTH_EVENT = 1
+DEPTH_SNAPSHOT_EVENT = 4
+
+EVENT_DTYPE = np.dtype(
+    [
+        ("ev", "<u8"),
+        ("exch_ts", "<i8"),
+        ("local_ts", "<i8"),
+        ("px", "<f8"),
+        ("qty", "<f8"),
+        ("order_id", "<u8"),
+        ("ival", "<i8"),
+        ("fval", "<f8"),
+    ],
+    align=True,
+)
+LATENCY_DTYPE = np.dtype(
+    [
+        ("req_ts", "<i8"),
+        ("exch_ts", "<i8"),
+        ("resp_ts", "<i8"),
+        ("_padding", "<i8"),
+    ],
+    align=True,
+)
 
 
-def _write_hftbacktest_fixture(directory: Path) -> tuple[Path, Path]:
-    events = []
+def _write_hftbacktest_fixture(directory: Path) -> tuple[Path, Path, Path]:
+    events = np.zeros(100, dtype=EVENT_DTYPE)
     for i in range(1, 51):
         timestamp = i * 100
-        events.extend(
-            [
-                ((1 << 30) | (1 << 29) | 1, timestamp, timestamp, 99.0 + i % 3, 10.0 + i, 0, 0, 0.0),
-                ((1 << 30) | (1 << 28) | 1, timestamp + 1, timestamp + 1, 101.0 + i % 3, 20.0 - i / 4, 0, 0, 0.0),
-            ]
+        events[2 * (i - 1)] = (
+            EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+            timestamp,
+            timestamp,
+            99.0 + i % 3,
+            10.0 + i,
+            0,
+            0,
+            0.0,
+        )
+        events[2 * (i - 1) + 1] = (
+            EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+            timestamp + 1,
+            timestamp + 1,
+            101.0 + i % 3,
+            20.0 - i / 4,
+            0,
+            0,
+            0.0,
         )
     data_path = directory / "data.npz"
-    _write_npz(
-        data_path,
-        events,
-        "[('ev', '<u8'), ('exch_ts', '<i8'), ('local_ts', '<i8'), ('px', '<f8'), "
-        "('qty', '<f8'), ('order_id', '<u8'), ('ival', '<i8'), ('fval', '<f8'), ]",
-        "<QqqddQqd8x",
+    np.savez(data_path, data=events)
+
+    latency = np.array(
+        [(0, 1, 2, 0), (10_000, 10_001, 10_002, 0)],
+        dtype=LATENCY_DTYPE,
     )
     latency_path = directory / "latency.npz"
-    _write_npz(
-        latency_path,
-        [(0, 1, 2, 0), (10_000, 10_001, 10_002, 0)],
-        "[('req_ts', '<i8'), ('exch_ts', '<i8'), ('resp_ts', '<i8'), ('_padding', '<i8'), ]",
-        "<qqqq",
+    np.savez(latency_path, data=latency)
+
+    snapshot = np.array(
+        [
+            (
+                EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_SNAPSHOT_EVENT,
+                0,
+                0,
+                99.0,
+                10.0,
+                0,
+                0,
+                0.0,
+            ),
+            (
+                EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT,
+                0,
+                0,
+                101.0,
+                10.0,
+                0,
+                0,
+                0.0,
+            ),
+        ],
+        dtype=EVENT_DTYPE,
     )
-    return data_path, latency_path
+    snapshot_path = directory / "snapshot.npz"
+    np.savez(snapshot_path, data=snapshot)
+    return data_path, latency_path, snapshot_path
+
+
+def _validate_hftbacktest_fixture(
+    data_path: Path, latency_path: Path, snapshot_path: Path
+) -> None:
+    with np.load(data_path) as archive:
+        events = archive["data"]
+    assert events.dtype == EVENT_DTYPE
+    assert events.dtype.itemsize == 64
+    assert events.shape == (100,)
+    expected_flags = {
+        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+    }
+    assert set(events["ev"].tolist()) == expected_flags
+    assert np.all(np.diff(events["exch_ts"]) >= 0)
+    assert np.all(events["local_ts"] >= events["exch_ts"])
+    assert np.all(events["px"] > 0)
+    assert np.all(events["qty"] > 0)
+
+    with np.load(latency_path) as archive:
+        latency = archive["data"]
+    assert latency.dtype == LATENCY_DTYPE
+    assert latency.dtype.itemsize == 32
+    assert latency.shape == (2,)
+    assert np.all(latency["req_ts"] <= latency["exch_ts"])
+    assert np.all(latency["exch_ts"] <= latency["resp_ts"])
+
+    with np.load(snapshot_path) as archive:
+        snapshot = archive["data"]
+    assert snapshot.dtype == EVENT_DTYPE
+    assert snapshot.shape == (2,)
+    assert set(snapshot["ev"].tolist()) == {
+        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_SNAPSHOT_EVENT,
+        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT,
+    }
 
 
 class GridsearchPipelineTests(unittest.TestCase):
@@ -77,12 +170,13 @@ class GridsearchPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-overlapping and ordered"):
             gridsearch._date_partitions(config)
 
-    def test_test_phase_requires_one_locked_validation_candidate(self) -> None:
+    def test_explore_then_locked_test_is_strictly_two_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = copy.deepcopy(self.config)
             base_root = Path(tmpdir)
             config["base_root"] = str(base_root)
-            for date in ("20250101", "20250102", "20250103"):
+            config["out_path"] = str(base_root / "out")
+            for date in ("20250101", "20250102"):
                 directory = base_root / "data" / config["exchange"] / "SYNTHUSDT"
                 latency_directory = base_root / "latency" / config["exchange"] / "SYNTHUSDT"
                 directory.mkdir(parents=True, exist_ok=True)
@@ -90,39 +184,82 @@ class GridsearchPipelineTests(unittest.TestCase):
                 (directory / f"SYNTHUSDT_{date}.npz").touch()
                 (latency_directory / f"latency_{date}.npz").touch()
 
-            config["gridsearch"].pop("locked_candidate")
-            with self.assertRaisesRegex(ValueError, "exactly one validation candidate"):
-                gridsearch._build_runs(config)
-
-            config["gridsearch"]["locked_candidate"] = ["one", "two"]
-            with self.assertRaisesRegex(ValueError, "exactly one validation candidate"):
-                gridsearch._build_runs(config)
-
-            config["gridsearch"]["locked_candidate"] = ["not-a-validation-candidate"]
-            with self.assertRaisesRegex(ValueError, "must match a candidate evaluated on validation"):
-                gridsearch._build_runs(config)
-
-            config["gridsearch"]["algo_params"] = {"alpha_scale": [25.0]}
-            algo = {"name": config["algo"]["name"], "params": dict(config["algo"]["params"], alpha_scale=25.0)}
-            grid = dict(config["grid"])
-            grid["order_qty"] = 1.0
-            grid["max_position"] = 5.0
-            grid["skew"] = 0.0001
-            locked = gridsearch._candidate_id("SYNTHUSDT", grid, algo, config["transform"])
+            exploration_runs = gridsearch._build_runs(config, phase_mode="explore")
+            self.assertTrue(exploration_runs)
+            self.assertEqual({run.phase for run in exploration_runs}, {"train", "validation"})
+            self.assertFalse(
+                (base_root / "data" / config["exchange"] / "SYNTHUSDT" / "SYNTHUSDT_20250103.npz").exists()
+            )
+            locked = next(
+                run.candidate_id for run in exploration_runs if run.phase == "validation"
+            )
             config["gridsearch"]["locked_candidate"] = [locked]
-            runs = gridsearch._build_runs(config)
-            self.assertEqual(len([run for run in runs if run.phase == "test"]), 1)
-            self.assertEqual({run.candidate_id for run in runs if run.phase == "test"}, {locked})
-            self.assertTrue(all(run.phase != "test" or run.candidate_id == locked for run in runs))
+
+            with self.assertRaisesRegex(ValueError, "requires gridsearch_validation_summary"):
+                gridsearch._build_runs(config, phase_mode="test")
+
+            output_dir = Path(config["out_path"])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for run in exploration_runs:
+                (output_dir / f"{run.name}.csv").write_text(
+                    "timestamp,balance,position,price,fee\n"
+                    "100,0,0,100,0\n"
+                    "200,0,0,100,0\n",
+                    encoding="utf-8",
+                )
+            gridsearch._summarize(
+                str(output_dir),
+                exploration_runs,
+                make_plots=False,
+                usd_per_order=100.0,
+                return_codes={run.name: 0 for run in exploration_runs},
+            )
+            validation_summary = output_dir / "gridsearch_validation_summary.csv"
+            self.assertTrue(validation_summary.exists())
+            self.assertFalse((output_dir / "gridsearch_test_summary.csv").exists())
+
+            directory = base_root / "data" / config["exchange"] / "SYNTHUSDT"
+            latency_directory = base_root / "latency" / config["exchange"] / "SYNTHUSDT"
+            (directory / "SYNTHUSDT_20250103.npz").touch()
+            (latency_directory / "latency_20250103.npz").touch()
+
+            test_runs = gridsearch._build_runs(config, phase_mode="test")
+            self.assertEqual(len(test_runs), 1)
+            self.assertEqual(test_runs[0].phase, "test")
+            self.assertEqual(test_runs[0].candidate_id, locked)
+
+            validation_summary.write_text(
+                f"candidate_id,phase,status\n{locked},validation,failed\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "no successful validation candidates"):
+                gridsearch._build_runs(config, phase_mode="test")
+
+    def test_test_phase_requires_exactly_one_locked_candidate(self) -> None:
+        config = copy.deepcopy(self.config)
+        config["gridsearch"].pop("locked_candidate")
+        with self.assertRaisesRegex(ValueError, "exactly one validation candidate"):
+            gridsearch._build_runs(config, phase_mode="test")
+
+        config["gridsearch"]["locked_candidate"] = ["one", "two"]
+        with self.assertRaisesRegex(ValueError, "exactly one validation candidate"):
+            gridsearch._build_runs(config, phase_mode="test")
+
+        config["gridsearch"]["locked_candidate"] = ["TODO(Dennis)"]
+        with self.assertRaisesRegex(ValueError, "replace gridsearch.locked_candidate"):
+            gridsearch._build_runs(config, phase_mode="test")
 
     def test_real_npz_command_uses_hftbacktest_and_distinct_algorithms(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
-            data_path, latency_path = _write_hftbacktest_fixture(directory)
-            outputs = []
+            data_path, latency_path, snapshot_path = _write_hftbacktest_fixture(directory)
+            _validate_hftbacktest_fixture(data_path, latency_path, snapshot_path)
+
+            executed = []
             for name, algo, transform in (
                 ("obi", "obi-static-alpha", "zscore"),
                 ("vamp", "vamp", "ema"),
+                ("baseline", "baseline", "none"),
             ):
                 command = gridsearch._build_cmd(
                     binary="cargo",
@@ -146,14 +283,25 @@ class GridsearchPipelineTests(unittest.TestCase):
                     time_ctrl={"elapse_ns": 100, "record_every": 1},
                     algo_cfg={"name": algo, "params": {"alpha_scale": 2.0}},
                     xform={"kind": transform, "window": 2, "ema_alpha": 0.5},
-                    initial_snapshot=str(data_path),
+                    initial_snapshot=str(snapshot_path),
                 )
                 command[1:1] = ["run", "--quiet", "--example", "gridtrading_backtest_args", "--"]
                 subprocess.run(command, cwd=REPO_ROOT, check=True)
                 output = next(directory.glob(f"{name}*.csv"))
                 self.assertGreater(len(output.read_text(encoding="utf-8").splitlines()), 1)
-                outputs.append(output.read_text(encoding="utf-8"))
-            self.assertTrue(all("timestamp,balance,position" in output for output in outputs))
+                self.assertIn("timestamp,balance,position", output.read_text(encoding="utf-8"))
+
+                manifest = json.loads(
+                    (directory / f"{name}_run_manifest.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(manifest["algorithm"], algo)
+                self.assertEqual(manifest["transform"], transform)
+                self.assertEqual(manifest["elapse_ns"], 100)
+                self.assertEqual(manifest["record_every"], 1)
+                executed.append(manifest["executed_strategy"])
+
+            self.assertEqual(executed, ["obi-static-alpha", "vamp", "baseline"])
+
 
     def test_missing_latency_is_rejected_with_migration_note(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires --latency-files"):

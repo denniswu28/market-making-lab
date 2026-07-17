@@ -30,14 +30,14 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Rust lint
-        run: cargo clippy --lib --bins --tests -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Rust build and tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets --all-features
 
       - name: Python checks
         run: |
-          python -m py_compile pipeline/4_backtest.py ob_backtest.py
+          python -m py_compile pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
           python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Offline synthetic smoke test
