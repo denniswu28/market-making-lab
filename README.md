@@ -25,12 +25,6 @@ How can order-book and short-horizon statistical signals be incorporated into an
 - `pipeline/snapshot_manifest.py` creates the required integrity sidecar for an externally produced initial-snapshot NPZ file.
 - `pipeline/*.yaml` now use portable placeholders for optional user-supplied real-data research only.
 
-## Dennis Wu's demonstrated contribution in this repository
-
-Dennis Wu designed and validated the strategy application and research pipeline built on the upstream `hftbacktest` framework. The upstream simulation engine, queue/fill models, connectors, data tooling, and tutorial base come from `nkaz001/hftbacktest` and are not claimed here as independently created work.
-
-See `PROVENANCE.md` for the file-by-file attribution map.
-
 ## Synthetic quick start
 
 Rust 1.89 and Python 3.11 are the supported toolchain versions.
