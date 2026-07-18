@@ -42,8 +42,11 @@ TRANSFORM_PARAMETER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "ema": {"ema_alpha": 0.1},
     "zscore": {"window": 300},
 }
-EVENT_KINDS = {1, 2, 3, 4, 5}
-DEPTH_KINDS = {1, 4, 5}
+DEPTH_EVENT_KIND = 1
+TRADE_EVENT_KIND = 2
+DEPTH_SNAPSHOT_EVENT_KIND = 4
+EVENT_KINDS = {DEPTH_EVENT_KIND, TRADE_EVENT_KIND, 3, DEPTH_SNAPSHOT_EVENT_KIND, 5}
+DEPTH_KINDS = {DEPTH_EVENT_KIND, DEPTH_SNAPSHOT_EVENT_KIND, 5}
 SIDE_REQUIRED_KINDS = {1, 2, 4, 5}
 EVENT_KIND_MASK = 0xFF
 EXCH_EVENT = 1 << 31
@@ -579,7 +582,7 @@ def _latency_dtype(np: Any) -> Any:
     )
 
 
-def _validate_event_file(path: str, label: str = "market-data file") -> Dict[str, int]:
+def _validate_event_file(path: str, label: str = "market-data file") -> Dict[str, Any]:
     import numpy as np
 
     events = _load_npz_array(path, label, _event_dtype(np))
@@ -601,28 +604,41 @@ def _validate_event_file(path: str, label: str = "market-data file") -> Dict[str
         )
     depth_rows = np.isin(kinds, list(DEPTH_KINDS))
 
+    exch_rows = (flags & np.uint64(EXCH_EVENT)) != 0
+    local_rows = (flags & np.uint64(LOCAL_EVENT)) != 0
     exch_ts = events["exch_ts"]
     local_ts = events["local_ts"]
-    if np.any(exch_ts < 0) or np.any(local_ts < 0):
-        raise ValueError(f"invalid HftBacktest {label} {path}: timestamps must be non-negative")
+    if np.any(exch_ts[exch_rows] < 0) or np.any(local_ts[local_rows] < 0):
+        raise ValueError(
+            f"invalid HftBacktest {label} {path}: active processor timestamps must be non-negative"
+        )
     if np.any(local_ts < exch_ts):
         raise ValueError(f"invalid HftBacktest {label} {path}: local_ts precedes exch_ts")
-    if np.any(np.diff(exch_ts) < 0) or np.any(np.diff(local_ts) < 0):
-        raise ValueError(f"invalid HftBacktest {label} {path}: timestamps are not monotonic")
+    if np.any(np.diff(exch_ts[exch_rows]) < 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: exchange events are out of order")
+    if np.any(np.diff(local_ts[local_rows]) < 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: local events are out of order")
 
-    prices = events["px"][depth_rows]
-    quantities = events["qty"][depth_rows]
+    trade_rows = kinds == TRADE_EVENT_KIND
+    market_rows = depth_rows | trade_rows
+    prices = events["px"][market_rows]
     if np.any(~np.isfinite(prices)) or np.any(prices <= 0):
-        raise ValueError(f"invalid HftBacktest {label} {path}: depth prices must be finite and positive")
-    if np.any(~np.isfinite(quantities)) or np.any(quantities <= 0):
+        raise ValueError(f"invalid HftBacktest {label} {path}: market prices must be finite and positive")
+    depth_quantities = events["qty"][depth_rows]
+    if np.any(~np.isfinite(depth_quantities)) or np.any(depth_quantities < 0):
         raise ValueError(
-            f"invalid HftBacktest {label} {path}: depth quantities must be finite and positive"
+            f"invalid HftBacktest {label} {path}: depth quantities must be finite and non-negative"
+        )
+    trade_quantities = events["qty"][trade_rows]
+    if np.any(~np.isfinite(trade_quantities)) or np.any(trade_quantities <= 0):
+        raise ValueError(
+            f"invalid HftBacktest {label} {path}: trade quantities must be finite and positive"
         )
     return {
-        "first_exch_ts": int(exch_ts[0]),
-        "last_exch_ts": int(exch_ts[-1]),
-        "first_local_ts": int(local_ts[0]),
-        "last_local_ts": int(local_ts[-1]),
+        "first_exch_ts": int(exch_ts[exch_rows][0]) if np.any(exch_rows) else None,
+        "last_exch_ts": int(exch_ts[exch_rows][-1]) if np.any(exch_rows) else None,
+        "first_local_ts": int(local_ts[local_rows][0]) if np.any(local_rows) else None,
+        "last_local_ts": int(local_ts[local_rows][-1]) if np.any(local_rows) else None,
         "rows": int(events.size),
     }
 
@@ -638,35 +654,60 @@ def _validate_latency_file(path: str) -> Dict[str, int]:
         raise ValueError(
             f"invalid HftBacktest latency file {path}: require 0 <= req_ts <= exch_ts <= resp_ts"
         )
-    if (
-        np.any(np.diff(request) < 0)
-        or np.any(np.diff(exchange) < 0)
-        or np.any(np.diff(response) < 0)
-    ):
-        raise ValueError(f"invalid HftBacktest latency file {path}: timestamps are not monotonic")
+    if np.any(np.diff(request) < 0) or np.any(np.diff(exchange) < 0):
+        raise ValueError(
+            f"invalid HftBacktest latency file {path}: request and exchange interpolation axes must be monotonic"
+        )
     return {
         "first_req_ts": int(request[0]),
-        "last_resp_ts": int(response[-1]),
+        "last_req_ts": int(request[-1]),
+        "first_exch_ts": int(exchange[0]),
+        "last_exch_ts": int(exchange[-1]),
         "rows": int(latency.size),
     }
 
 
 def _validate_partition_inputs(data_files: List[str], latency_files: List[str]) -> int:
-    previous_data_end: Optional[int] = None
-    previous_latency_end: Optional[int] = None
+    previous_exchange_end: Optional[int] = None
+    previous_local_end: Optional[int] = None
+    previous_request_end: Optional[int] = None
+    previous_latency_exchange_end: Optional[int] = None
     first_replay_ts: Optional[int] = None
     for data_path, latency_path in zip(data_files, latency_files, strict=True):
         event_info = _validate_event_file(data_path)
         latency_info = _validate_latency_file(latency_path)
-        if previous_data_end is not None and event_info["first_local_ts"] < previous_data_end:
-            raise ValueError("market-data files are not monotonic across configured dates")
-        if previous_latency_end is not None and latency_info["first_req_ts"] < previous_latency_end:
-            raise ValueError("latency files are not monotonic across configured dates")
-        previous_data_end = event_info["last_local_ts"]
-        previous_latency_end = latency_info["last_resp_ts"]
-        if first_replay_ts is None:
-            first_replay_ts = event_info["first_local_ts"]
-    assert first_replay_ts is not None
+        first_exchange = event_info["first_exch_ts"]
+        first_local = event_info["first_local_ts"]
+        if (
+            previous_exchange_end is not None
+            and first_exchange is not None
+            and first_exchange < previous_exchange_end
+        ) or (
+            previous_local_end is not None
+            and first_local is not None
+            and first_local < previous_local_end
+        ):
+            raise ValueError("market-data processor streams are not monotonic across configured dates")
+        if (
+            previous_request_end is not None
+            and latency_info["first_req_ts"] < previous_request_end
+        ) or (
+            previous_latency_exchange_end is not None
+            and latency_info["first_exch_ts"] < previous_latency_exchange_end
+        ):
+            raise ValueError(
+                "latency request/exchange interpolation axes are not monotonic across configured dates"
+            )
+        if event_info["last_exch_ts"] is not None:
+            previous_exchange_end = event_info["last_exch_ts"]
+        if event_info["last_local_ts"] is not None:
+            previous_local_end = event_info["last_local_ts"]
+        previous_request_end = latency_info["last_req_ts"]
+        previous_latency_exchange_end = latency_info["last_exch_ts"]
+        if first_replay_ts is None and first_local is not None:
+            first_replay_ts = first_local
+    if first_replay_ts is None:
+        raise ValueError("market-data partition must contain at least one local event")
     return first_replay_ts
 
 
@@ -674,8 +715,50 @@ def _snapshot_manifest_path(path: str) -> str:
     return f"{path}.manifest.json"
 
 
-def _validate_snapshot_file(path: str, first_replay_ts: int) -> Dict[str, Any]:
-    event_info = _validate_event_file(path, label="initial snapshot")
+def _validate_snapshot_file(
+    path: str,
+    first_replay_ts: int,
+    tick_size: float,
+    lot_size: float,
+) -> Dict[str, Any]:
+    _validate_event_file(path, label="initial snapshot")
+    import numpy as np
+
+    events = _load_npz_array(path, "initial snapshot", _event_dtype(np))
+    flags = events["ev"]
+    kinds = flags & np.uint64(EVENT_KIND_MASK)
+    if np.any(kinds != DEPTH_SNAPSHOT_EVENT_KIND):
+        raise ValueError("initial snapshot may contain only DEPTH_SNAPSHOT_EVENT rows")
+    prices = events["px"]
+    quantities = events["qty"]
+    if np.any(~np.isfinite(prices)) or np.any(prices <= 0):
+        raise ValueError("initial snapshot prices must be finite and positive")
+    if np.any(~np.isfinite(quantities)) or np.any(quantities <= 0):
+        raise ValueError("initial snapshot quantities must be finite and positive")
+    if (
+        not math.isfinite(tick_size)
+        or tick_size <= 0
+        or not math.isfinite(lot_size)
+        or lot_size <= 0
+    ):
+        raise ValueError("initial snapshot requires positive finite tick_size and lot_size")
+    aligned_prices = np.rint(prices / tick_size) * tick_size
+    aligned_quantities = np.rint(quantities / lot_size) * lot_size
+    if not np.all(np.isclose(prices, aligned_prices, rtol=1e-12, atol=tick_size * 1e-9)):
+        raise ValueError("initial snapshot prices must align to tick_size")
+    if not np.all(
+        np.isclose(quantities, aligned_quantities, rtol=1e-12, atol=lot_size * 1e-9)
+    ):
+        raise ValueError("initial snapshot quantities must align to lot_size")
+    buy_rows = (flags & np.uint64(BUY_EVENT)) != 0
+    sell_rows = (flags & np.uint64(SELL_EVENT)) != 0
+    if not np.any(buy_rows) or not np.any(sell_rows):
+        raise ValueError("initial snapshot requires at least one bid and one ask")
+    best_bid = float(np.max(prices[buy_rows]))
+    best_ask = float(np.min(prices[sell_rows]))
+    if best_bid >= best_ask:
+        raise ValueError("initial snapshot best_bid must be strictly less than best_ask")
+
     manifest_path = _snapshot_manifest_path(path)
     if not os.path.isfile(manifest_path):
         raise ValueError(f"initial snapshot requires sidecar manifest: {manifest_path}")
@@ -694,7 +777,7 @@ def _validate_snapshot_file(path: str, first_replay_ts: int) -> Dict[str, Any]:
     as_of_ns = manifest.get("as_of_ns")
     if isinstance(as_of_ns, bool) or not isinstance(as_of_ns, int):
         raise ValueError("initial snapshot manifest as_of_ns must be an integer")
-    if as_of_ns < event_info["last_local_ts"]:
+    if as_of_ns < int(np.max(events["local_ts"])):
         raise ValueError("initial snapshot as_of_ns precedes a timestamp stored in the snapshot")
     if as_of_ns >= first_replay_ts:
         raise ValueError("initial snapshot as_of_ns must be earlier than the first replay event")
@@ -719,11 +802,16 @@ def _validate_snapshot_file(path: str, first_replay_ts: int) -> Dict[str, Any]:
 
 
 def _resolve_initial_snapshot(
-    cfg: Dict[str, Any], symbol: str, first_date_yyyymmdd: str, first_replay_ts: int
+    cfg: Dict[str, Any],
+    symbol: str,
+    first_date_yyyymmdd: str,
+    first_replay_ts: int,
+    tick_size: float,
+    lot_size: float,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     path = _snapshot_path(cfg, symbol, first_date_yyyymmdd)
     if path is not None:
-        return path, _validate_snapshot_file(path, first_replay_ts)
+        return path, _validate_snapshot_file(path, first_replay_ts, tick_size, lot_size)
     return None, None
 
 
@@ -1183,7 +1271,12 @@ def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpe
             first_replay_ts = _validate_partition_inputs(data_files, latency_files)
 
             init_snap, snapshot_metadata = _resolve_initial_snapshot(
-                cfg, sym, dates[0], first_replay_ts
+                cfg,
+                sym,
+                dates[0],
+                first_replay_ts,
+                base_params["tick_size"],
+                base_params["lot_size"],
             )
             partition_manifest_json, partition_manifest_sha256 = _manifest(
                 _partition_manifest(cfg, sym)

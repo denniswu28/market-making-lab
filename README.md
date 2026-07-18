@@ -13,7 +13,7 @@ How can order-book and short-horizon statistical signals be incorporated into an
 - One public comparison between:
   - a signal-free market-making baseline; and
   - an order-book-imbalance (OBI) variant with trailing-window warm-up.
-- A minimal Python wrapper that runs both variants without exchange credentials, vendor data, network access, or a sibling checkout.
+- After dependencies are installed, a minimal Python wrapper runs both variants without runtime network or exchange calls, exchange credentials, vendor data, or a sibling checkout.
 - An optional, offline-only HftBacktest `.npz` grid-search adapter for user-supplied research data.
 
 ## Architecture
@@ -27,7 +27,7 @@ How can order-book and short-horizon statistical signals be incorporated into an
 
 ## Dennis Wu's demonstrated contribution in this repository
 
-Dennis Wu designed and validated the market-making strategy application, the surrounding research pipeline, and the repository-specific synthetic validation workflow in this repository. The upstream simulation engine, queue/fill models, connectors, data tooling, and tutorial base come from `nkaz001/hftbacktest` and are not claimed here as independently created work.
+Dennis Wu designed and validated the strategy application and research pipeline built on the upstream `hftbacktest` framework. The upstream simulation engine, queue/fill models, connectors, data tooling, and tutorial base come from `nkaz001/hftbacktest` and are not claimed here as independently created work.
 
 See `PROVENANCE.md` for the file-by-file attribution map.
 
@@ -64,10 +64,12 @@ The optional grid search uses the pinned upstream HftBacktest APIs and requires 
 market-data and latency files, plus an optional initial-snapshot NPZ file, in the pinned upstream
 schema. It accepts only level-2 depth and trade event kinds; depth and trade events require valid side
 semantics. Before launching Rust, it rejects empty arrays, unsupported event kinds, invalid sides,
-non-finite or non-positive depth prices or quantities, non-monotonic timestamps,
-`local_ts < exch_ts`, and invalid request/exchange/response latency ordering. It does not accept the
-CSV fixture; use the synthetic quick start for that workflow. Its Python analysis dependencies are
-isolated from the default installation:
+non-finite or non-positive market prices, negative depth quantities, non-positive trade quantities,
+`local_ts < exch_ts`, processor-specific exchange/local ordering defects, negative per-row order
+latencies, and unordered request/exchange interpolation axes. Zero depth quantity is retained as the
+pinned engine's level-deletion operation, and concurrent requests may complete out of response order.
+It does not accept the CSV fixture; use the synthetic quick start for that workflow. Its Python
+analysis dependencies are isolated from the default installation:
 
 ```bash
 python -m pip install -r requirements-research.txt
@@ -93,8 +95,10 @@ The `source` value is a logical provenance label, not a machine-specific path. T
 ```
 
 The grid search verifies the sidecar hash, requires `as_of_ns` to cover every event stored in the
-snapshot, and requires it to be strictly earlier than the first replay event. This prevents a
-same-period or future snapshot from introducing lookahead.
+snapshot, and requires it to be strictly earlier than the first replay event. It also requires only
+snapshot-depth rows, positive tick/lot-aligned values, both book sides, and a strictly non-crossed
+BBO. These checks prevent a same-period, future, or structurally invalid snapshot from initializing
+the replay.
 
 The explore phase runs train and validation only and writes
 `gridsearch_validation_summary.csv`; it never reads or executes the test partition. After reviewing

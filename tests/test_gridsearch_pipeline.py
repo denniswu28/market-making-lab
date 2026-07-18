@@ -67,25 +67,49 @@ LATENCY_DTYPE = np.dtype(
 
 
 def _write_hftbacktest_fixture(directory: Path) -> tuple[Path, Path, Path]:
-    events = np.zeros(100, dtype=EVENT_DTYPE)
+    events = np.zeros(200, dtype=EVENT_DTYPE)
     for i in range(1, 51):
         timestamp = i * 100
-        events[2 * (i - 1)] = (
-            EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+        bid_price = 98.0 + i % 2
+        ask_price = 101.0 + i % 2
+        bid_quantity = 0.0 if i == 10 else 10.0 + i
+        offset = 4 * (i - 1)
+        events[offset] = (
+            EXCH_EVENT | BUY_EVENT | DEPTH_EVENT,
             timestamp,
-            timestamp,
-            99.0 + i % 3,
-            10.0 + i,
+            timestamp + 30,
+            bid_price,
+            bid_quantity,
             0,
             0,
             0.0,
         )
-        events[2 * (i - 1) + 1] = (
-            EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
-            timestamp + 1,
-            timestamp + 1,
-            101.0 + i % 3,
+        events[offset + 1] = (
+            EXCH_EVENT | SELL_EVENT | DEPTH_EVENT,
+            timestamp + 10,
+            timestamp + 20,
+            ask_price,
             20.0 - i / 4,
+            0,
+            0,
+            0.0,
+        )
+        events[offset + 2] = (
+            LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+            timestamp + 10,
+            timestamp + 20,
+            ask_price,
+            20.0 - i / 4,
+            0,
+            0,
+            0.0,
+        )
+        events[offset + 3] = (
+            LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+            timestamp,
+            timestamp + 30,
+            bid_price,
+            bid_quantity,
             0,
             0,
             0.0,
@@ -94,7 +118,7 @@ def _write_hftbacktest_fixture(directory: Path) -> tuple[Path, Path, Path]:
     np.savez(data_path, data=events)
 
     latency = np.array(
-        [(0, 1, 2, 0), (10_000, 10_001, 10_002, 0)],
+        [(0, 1, 100, 0), (10, 11, 20, 0)],
         dtype=LATENCY_DTYPE,
     )
     latency_path = directory / "latency.npz"
@@ -137,16 +161,24 @@ def _validate_hftbacktest_fixture(
         events = archive["data"]
     assert events.dtype == EVENT_DTYPE
     assert events.dtype.itemsize == 64
-    assert events.shape == (100,)
+    assert events.shape == (200,)
     expected_flags = {
-        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
-        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+        EXCH_EVENT | BUY_EVENT | DEPTH_EVENT,
+        EXCH_EVENT | SELL_EVENT | DEPTH_EVENT,
+        LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+        LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
     }
     assert set(events["ev"].tolist()) == expected_flags
-    assert np.all(np.diff(events["exch_ts"]) >= 0)
+    exch_rows = events["ev"] & EXCH_EVENT != 0
+    local_rows = events["ev"] & LOCAL_EVENT != 0
+    assert np.all(np.diff(events["exch_ts"][exch_rows]) >= 0)
+    assert np.all(np.diff(events["local_ts"][local_rows]) >= 0)
+    assert np.any(np.diff(events["exch_ts"]) < 0)
+    assert np.any(np.diff(events["local_ts"]) < 0)
     assert np.all(events["local_ts"] >= events["exch_ts"])
     assert np.all(events["px"] > 0)
-    assert np.all(events["qty"] > 0)
+    assert np.all(events["qty"] >= 0)
+    assert np.any(events["qty"] == 0)
 
     with np.load(latency_path) as archive:
         latency = archive["data"]
@@ -155,6 +187,9 @@ def _validate_hftbacktest_fixture(
     assert latency.shape == (2,)
     assert np.all(latency["req_ts"] <= latency["exch_ts"])
     assert np.all(latency["exch_ts"] <= latency["resp_ts"])
+    assert np.all(np.diff(latency["req_ts"]) >= 0)
+    assert np.all(np.diff(latency["exch_ts"]) >= 0)
+    assert np.any(np.diff(latency["resp_ts"]) < 0)
 
     with np.load(snapshot_path) as archive:
         snapshot = archive["data"]
@@ -164,6 +199,8 @@ def _validate_hftbacktest_fixture(
         EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_SNAPSHOT_EVENT,
         EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT,
     }
+    gridsearch._validate_event_file(str(data_path))
+    gridsearch._validate_latency_file(str(latency_path))
 
 
 def _write_partition_inputs(config: dict, base_root: Path, dates: tuple[str, ...]) -> None:
@@ -677,6 +714,49 @@ class GridsearchPipelineTests(unittest.TestCase):
             runs = gridsearch._build_runs(config, phase_mode="explore")
             self.assertTrue(runs)
 
+    def test_snapshot_semantics_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot = Path(tmpdir) / "snapshot.npz"
+            cases = (
+                ("trade_rows", "only DEPTH_SNAPSHOT_EVENT"),
+                ("missing_bid", "at least one bid and one ask"),
+                ("crossed_book", "best_bid must be strictly less"),
+                ("zero_quantity", "quantities must be finite and positive"),
+                ("off_tick", "prices must align to tick_size"),
+                ("off_lot", "quantities must align to lot_size"),
+            )
+            for name, expected in cases:
+                with self.subTest(case=name):
+                    _write_snapshot_fixture(snapshot, event_timestamp=100, as_of_ns=200)
+                    with np.load(snapshot) as archive:
+                        rows = archive["data"].copy()
+                    if name == "trade_rows":
+                        rows["ev"] = (
+                            rows["ev"] & np.uint64(~0xFF & ((1 << 64) - 1))
+                        ) | np.uint64(2)
+                    elif name == "missing_bid":
+                        rows[0]["ev"] = (
+                            EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_SNAPSHOT_EVENT
+                        )
+                    elif name == "crossed_book":
+                        rows[0]["px"] = 101.0
+                        rows[1]["px"] = 100.0
+                    elif name == "zero_quantity":
+                        rows[0]["qty"] = 0.0
+                    elif name == "off_tick":
+                        rows[0]["px"] = 99.5
+                    elif name == "off_lot":
+                        rows[0]["qty"] = 10.5
+                    np.savez(snapshot, data=rows)
+                    _write_snapshot_sidecar(snapshot, as_of_ns=200)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        gridsearch._validate_snapshot_file(
+                            str(snapshot),
+                            first_replay_ts=300,
+                            tick_size=1.0,
+                            lot_size=1.0,
+                        )
+
     def test_external_snapshot_utility_writes_verified_as_of_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
@@ -728,20 +808,113 @@ class GridsearchPipelineTests(unittest.TestCase):
             self.assertEqual(manifest["as_of_ns"], 200)
             self.assertEqual(manifest["snapshot_sha256"], gridsearch._sha256_file(str(snapshot)))
             self.assertEqual(manifest["source"], "external-test")
-            gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+            gridsearch._validate_snapshot_file(
+                str(snapshot), first_replay_ts=201, tick_size=1.0, lot_size=1.0
+            )
 
             with self.assertRaisesRegex(ValueError, "logical label, not a path"):
                 snapshot_manifest.write_snapshot_manifest(snapshot, 200, str(directory))
             manifest["source"] = str(directory)
             sidecar.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "logical label, not a path"):
-                gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+                gridsearch._validate_snapshot_file(
+                    str(snapshot), first_replay_ts=201, tick_size=1.0, lot_size=1.0
+                )
             manifest["source"] = "external-test"
             sidecar.write_text(json.dumps(manifest), encoding="utf-8")
 
-            np.savez(snapshot, data=snapshot_events[:1])
+            tampered_snapshot = snapshot_events.copy()
+            tampered_snapshot[0]["qty"] = 11.0
+            np.savez(snapshot, data=tampered_snapshot)
             with self.assertRaisesRegex(ValueError, "snapshot_sha256 does not match"):
-                gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+                gridsearch._validate_snapshot_file(
+                    str(snapshot), first_replay_ts=201, tick_size=1.0, lot_size=1.0
+                )
+
+    def test_upstream_split_events_deletions_and_overlapping_latency_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = copy.deepcopy(self.config)
+            base_root = Path(tmpdir)
+            config["base_root"] = str(base_root)
+            config["out_path"] = str(base_root / "out")
+            _write_partition_inputs(config, base_root, ("20250101", "20250102"))
+
+            first_timestamp = int("20250101") * 1_000
+            split_events = np.array(
+                [
+                    (
+                        EXCH_EVENT | BUY_EVENT | DEPTH_EVENT,
+                        first_timestamp,
+                        first_timestamp + 30,
+                        99.0,
+                        0.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                    (
+                        EXCH_EVENT | SELL_EVENT | DEPTH_EVENT,
+                        first_timestamp + 10,
+                        first_timestamp + 20,
+                        101.0,
+                        5.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                    (
+                        LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
+                        first_timestamp + 10,
+                        first_timestamp + 20,
+                        101.0,
+                        5.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                    (
+                        LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
+                        first_timestamp,
+                        first_timestamp + 30,
+                        99.0,
+                        0.0,
+                        0,
+                        0,
+                        0.0,
+                    ),
+                ],
+                dtype=EVENT_DTYPE,
+            )
+            data_path = (
+                base_root
+                / "data"
+                / config["exchange"]
+                / "SYNTHUSDT"
+                / "SYNTHUSDT_20250101.npz"
+            )
+            np.savez(data_path, data=split_events)
+
+            second_request = int("20250102") * 1_000
+            latency = np.array(
+                [
+                    (first_timestamp, first_timestamp + 1, second_request + 100, 0),
+                    (first_timestamp + 10, first_timestamp + 11, first_timestamp + 20, 0),
+                ],
+                dtype=LATENCY_DTYPE,
+            )
+            latency_path = (
+                base_root
+                / "latency"
+                / config["exchange"]
+                / "SYNTHUSDT"
+                / "latency_20250101.npz"
+            )
+            np.savez(latency_path, data=latency)
+
+            runs = gridsearch._build_runs(config, phase_mode="explore")
+            self.assertTrue(runs)
+            self.assertLess(split_events["exch_ts"][-1], split_events["exch_ts"][1])
+            self.assertLess(latency["resp_ts"][1], latency["resp_ts"][0])
 
     def test_runtime_npz_and_empty_results_fail_closed_through_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -786,20 +959,26 @@ class GridsearchPipelineTests(unittest.TestCase):
                 ("flags", "unsupported event flags"),
                 ("l3_kind", "unsupported event flags"),
                 ("trade_without_side", "depth and trade events require one side"),
-                ("price", "depth prices must be finite and positive"),
-                ("quantity", "depth quantities must be finite and positive"),
-                ("nonfinite_price", "depth prices must be finite and positive"),
+                ("price", "market prices must be finite and positive"),
+                ("quantity", "depth quantities must be finite and non-negative"),
+                ("nonfinite_price", "market prices must be finite and positive"),
                 ("event_time", "local_ts precedes exch_ts"),
+                ("exchange_order", "exchange events are out of order"),
+                ("local_order", "local events are out of order"),
                 ("latency_time", "req_ts <= exch_ts <= resp_ts"),
+                ("latency_axis", "interpolation axes must be monotonic"),
             ):
                 with self.subTest(case=case):
                     _write_partition_inputs(config, base_root, ("20250101", "20250102"))
                     if case == "dtype":
                         np.savez(data_path, data=np.array([1, 2, 3]))
-                    elif case == "latency_time":
+                    elif case in {"latency_time", "latency_axis"}:
                         with np.load(latency_path) as archive:
                             latency = archive["data"].copy()
-                        latency[0]["resp_ts"] = latency[0]["req_ts"] - 1
+                        if case == "latency_time":
+                            latency[0]["resp_ts"] = latency[0]["req_ts"] - 1
+                        else:
+                            latency[1]["req_ts"] = latency[0]["req_ts"] - 1
                         np.savez(latency_path, data=latency)
                     else:
                         with np.load(data_path) as archive:
@@ -813,9 +992,13 @@ class GridsearchPipelineTests(unittest.TestCase):
                         elif case == "price":
                             events[0]["px"] = -1.0
                         elif case == "quantity":
-                            events[0]["qty"] = 0.0
+                            events[0]["qty"] = -1.0
                         elif case == "nonfinite_price":
                             events[0]["px"] = np.nan
+                        elif case == "exchange_order":
+                            events[1]["exch_ts"] = events[0]["exch_ts"] - 1
+                        elif case == "local_order":
+                            events[0]["local_ts"] = events[1]["local_ts"] + 100
                         else:
                             events[0]["local_ts"] = events[0]["exch_ts"] - 1
                         np.savez(data_path, data=events)

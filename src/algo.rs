@@ -1239,10 +1239,18 @@ where
 
         // -------- MUTATIONS (safe: no immutable borrows alive) --------
         for id in cancels {
-            let _ = hbt.cancel(asset, id, false);
+            hbt.cancel(asset, id, false).map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "cancel failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
         for (id, px) in post_bids {
-            let _ = Bot::submit_buy_order(
+            Bot::submit_buy_order(
                 hbt,
                 asset,
                 id,
@@ -1251,10 +1259,20 @@ where
                 TimeInForce::GTX,
                 OrdType::Limit,
                 false,
-            );
+            )
+            .map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "buy",
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "submission failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
         for (id, px) in post_asks {
-            let _ = Bot::submit_sell_order(
+            Bot::submit_sell_order(
                 hbt,
                 asset,
                 id,
@@ -1263,7 +1281,17 @@ where
                 TimeInForce::GTX,
                 OrdType::Limit,
                 false,
-            );
+            )
+            .map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "sell",
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "submission failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
 
         // record after updates

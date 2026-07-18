@@ -26,14 +26,14 @@ The following remain upstream `hftbacktest` contributions and should not be desc
 - data normalization utilities and tutorial foundations;
 - the broader examples that this repository adapts.
 
-## Repository-owned additions demonstrated here
+## Repository behavior added in this implementation
 
-This repository demonstrates Dennis Wu's strategy application and validation work around:
+The current implementation includes:
 
-- selecting the market-making research question and public synthetic benchmark;
-- shaping portable configuration and pipeline boundaries for reproducibility;
-- adding repository-owned invariant tests for latency, inventory, fee, and signal behavior;
-- defining the supported/offline-versus-experimental boundary for public review.
+- the approved market-making research question and public synthetic benchmark;
+- portable configuration and pipeline boundaries for reproducibility;
+- invariant tests for latency, inventory, fee, and signal behavior;
+- an explicit supported/offline-versus-experimental boundary for public review.
 
 ## License notes
 
