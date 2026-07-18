@@ -2,8 +2,6 @@
 base_root: "./out/user_supplied"
 exchange: "binance-futures"
 symbols: ["SYNTHUSDT"]
-date_from: 20250101
-date_to: 20250101
 initial_snapshot: null
 binary: "target/release/examples/gridtrading_backtest_args"
 num_proc: 1
@@ -35,7 +33,6 @@ algo:
 transform:
   kind: "zscore"
   window: 60
-  ema_alpha: 0.1
 out_path: "./out/gridsearch"
 gridsearch:
   rel_half_spread: [0.0005]
@@ -46,8 +43,10 @@ gridsearch:
   algo_params:
     alpha_scale: [25.0, 50.0]
   skip_existing: false
-  random_seed: 7
   train_dates: [20250101, 20250101]
   validation_dates: [20250102, 20250102]
   test_dates: [20250103, 20250103]
+  # TODO(Dennis): replace after reviewing gridsearch_validation_summary.csv.
+  # This must be exactly one candidate_id from that file before test data can run.
+  locked_candidate: ["TODO(Dennis)"]
 delete_inputs_after: false

@@ -22,20 +22,22 @@ jobs:
           python-version: '3.11'
 
       - name: Install Python requirements
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-research.txt
 
       - name: Rust format check
         run: cargo fmt --all -- --check
 
       - name: Rust lint
-        run: cargo clippy --lib --bins --tests -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Rust build and tests
-        run: cargo test --all-targets
+        run: cargo test --all-targets --all-features
 
       - name: Python checks
         run: |
-          python -m py_compile pipeline/4_backtest.py ob_backtest.py
+          python -m py_compile pipeline/2_latency.py pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py pipeline/snapshot_manifest.py pipeline/snapshot_validator.py ob_backtest.py
           python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Offline synthetic smoke test

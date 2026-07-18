@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+from snapshot_manifest import write_snapshot_manifest_from_sources
 
 # Optional: fetch tick/lot via your helper (SOCKS5 supported)
 try:
@@ -231,6 +232,7 @@ def main():
                     initial_snapshot=cur_init,
                     output_snapshot_filename=out_path,
                 )
+                write_snapshot_manifest_from_sources(out_path, files_upto_d)
                 # next day starts from this snapshot
                 cur_init = out_path
         else:
@@ -245,6 +247,7 @@ def main():
                 initial_snapshot=initial_snapshot,
                 output_snapshot_filename=out_path,
             )
+            write_snapshot_manifest_from_sources(out_path, data_files)
 
     print("[snapshot] Done.")
 

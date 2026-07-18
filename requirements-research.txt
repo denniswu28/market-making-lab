@@ -1,0 +1,4 @@
+PyYAML==6.0.2
+numpy==2.2.6
+pandas==2.3.2
+matplotlib==3.10.6

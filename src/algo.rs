@@ -11,7 +11,7 @@
 use hftbacktest::depth::{INVALID_MAX, INVALID_MIN};
 use hftbacktest::prelude::*;
 use std::collections::HashMap;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 /// ---------------------------
 /// Rolling utilities
 /// ---------------------------
@@ -311,6 +311,40 @@ fn collect_side_until_qty<MD: MarketDepth>(depth: &MD, side: Side, target_qty: f
 /// Common grid quote update
 /// ---------------------------
 
+const INVALID_QUOTE_CONFIGURATION: i64 = -2;
+const ORDER_OPERATION_FAILED: i64 = -3;
+
+fn allowed_grid_levels(
+    side: Side,
+    position: f64,
+    max_position: f64,
+    order_qty: f64,
+    grid_num: usize,
+) -> usize {
+    let remaining = match side {
+        Side::Buy => max_position - position,
+        Side::Sell => max_position + position,
+        _ => 0.0,
+    };
+    if !remaining.is_finite() || remaining <= 0.0 || order_qty <= 0.0 {
+        return 0;
+    }
+    ((remaining / order_qty + 1e-12).floor() as usize).min(grid_num)
+}
+
+fn transformed_fair_price(
+    transform: &Transform,
+    mid: f64,
+    transformed_value: f64,
+    z_as_alpha_scale: f64,
+) -> f64 {
+    if matches!(transform, Transform::ZScore { .. }) {
+        mid + z_as_alpha_scale * transformed_value
+    } else {
+        transformed_value
+    }
+}
+
 fn update_grid<I, MD>(
     hbt: &mut I,
     forecast_mid_price: f64,
@@ -325,6 +359,7 @@ fn update_grid<I, MD>(
 where
     MD: MarketDepth,
     I: Bot<MD>,
+    <I as Bot<MD>>::Error: std::fmt::Debug,
 {
     let tick_size = hbt.depth(0).tick_size() as f64;
     let min_grid_step = (min_grid_step / tick_size).round() * tick_size;
@@ -334,6 +369,28 @@ where
 
     if depth.best_bid_tick() == INVALID_MIN || depth.best_ask_tick() == INVALID_MAX {
         return Ok(()); // no BBO yet
+    }
+    if forecast_mid_price.is_nan() {
+        return Ok(()); // transform warm-up has not produced a quoteable value yet
+    }
+    if !forecast_mid_price.is_finite()
+        || forecast_mid_price <= 0.0
+        || !tick_size.is_finite()
+        || tick_size <= 0.0
+        || !min_grid_step.is_finite()
+        || min_grid_step <= 0.0
+        || !order_qty.is_finite()
+        || order_qty <= 0.0
+        || !max_position.is_finite()
+        || max_position <= 0.0
+        || !relative_half_spread.is_finite()
+        || relative_half_spread < 0.0
+        || !relative_grid_interval.is_finite()
+        || relative_grid_interval <= 0.0
+        || !skew.is_finite()
+        || grid_num == 0
+    {
+        return Err(INVALID_QUOTE_CONFIGURATION);
     }
     // inventory skew in *relative* space; match template
     let normalized_position = position / order_qty;
@@ -350,6 +407,13 @@ where
     ask_price = (ask_price / grid_interval).ceil() * grid_interval;
     let lot = hbt.depth(0).lot_size() as f64;
     let tick_order_qty = ((order_qty / lot).round_ties_even()) * lot;
+    if !lot.is_finite() || lot <= 0.0 || !tick_order_qty.is_finite() || tick_order_qty <= 0.0 {
+        return Err(INVALID_QUOTE_CONFIGURATION);
+    }
+    let buy_levels =
+        allowed_grid_levels(Side::Buy, position, max_position, tick_order_qty, grid_num);
+    let sell_levels =
+        allowed_grid_levels(Side::Sell, position, max_position, tick_order_qty, grid_num);
 
     debug!(
         mid = forecast_mid_price,
@@ -369,8 +433,11 @@ where
     {
         let orders = hbt.orders(0);
         let mut new_bid = HashMap::new();
-        if position < max_position && bid_price.is_finite() {
-            for _ in 0..grid_num {
+        if buy_levels > 0 && bid_price.is_finite() {
+            for _ in 0..buy_levels {
+                if bid_price <= 0.0 || !bid_price.is_finite() {
+                    return Err(INVALID_QUOTE_CONFIGURATION);
+                }
                 let tid = (bid_price / tick_size).round() as u64;
                 new_bid.insert(tid, bid_price);
                 bid_price -= grid_interval;
@@ -387,36 +454,62 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
+        let has_pending = orders
+            .values()
+            .any(|order| order.side == Side::Buy && order.pending());
+        let had_cancels = !cancels.is_empty();
         for id in cancels {
             debug!(side = "buy", order_id = id, "cancel BUY");
-            let _ = hbt.cancel(0, id, false);
+            hbt.cancel(0, id, false).map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "buy",
+                    order_id = id,
+                    "cancel failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
-        for (id, px) in posts {
-            debug!(
-                side = "buy",
-                order_id = id,
-                price = px,
-                qty = tick_order_qty,
-                "post BUY"
-            );
-            let _ = hftbacktest::prelude::Bot::submit_buy_order(
-                hbt,
-                0,
-                id,
-                px,
-                tick_order_qty,
-                TimeInForce::GTX,
-                OrdType::Limit,
-                false,
-            );
+        if !had_cancels && !has_pending {
+            for (id, px) in posts {
+                debug!(
+                    side = "buy",
+                    order_id = id,
+                    price = px,
+                    qty = tick_order_qty,
+                    "post BUY"
+                );
+                hftbacktest::prelude::Bot::submit_buy_order(
+                    hbt,
+                    0,
+                    id,
+                    px,
+                    tick_order_qty,
+                    TimeInForce::GTX,
+                    OrdType::Limit,
+                    false,
+                )
+                .map_err(|operation_error| {
+                    error!(
+                        ?operation_error,
+                        side = "buy",
+                        order_id = id,
+                        "submission failed"
+                    );
+                    ORDER_OPERATION_FAILED
+                })?;
+            }
         }
     }
     // SELL side
     {
         let orders = hbt.orders(0);
         let mut new_ask = HashMap::new();
-        if position > -max_position && ask_price.is_finite() {
-            for _ in 0..grid_num {
+        if sell_levels > 0 && ask_price.is_finite() {
+            for _ in 0..sell_levels {
+                if ask_price <= 0.0 || !ask_price.is_finite() {
+                    return Err(INVALID_QUOTE_CONFIGURATION);
+                }
                 let tid = (ask_price / tick_size).round() as u64;
                 new_ask.insert(tid, ask_price);
                 ask_price += grid_interval;
@@ -433,28 +526,51 @@ where
             .into_iter()
             .filter(|(id, _)| !orders.contains_key(id))
             .collect();
+        let has_pending = orders
+            .values()
+            .any(|order| order.side == Side::Sell && order.pending());
+        let had_cancels = !cancels.is_empty();
         for id in cancels {
             debug!(side = "sell", order_id = id, "cancel SELL");
-            let _ = hbt.cancel(0, id, false);
+            hbt.cancel(0, id, false).map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "sell",
+                    order_id = id,
+                    "cancel failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
-        for (id, px) in posts {
-            debug!(
-                side = "sell",
-                order_id = id,
-                price = px,
-                qty = tick_order_qty,
-                "post SELL"
-            );
-            let _ = hftbacktest::prelude::Bot::submit_sell_order(
-                hbt,
-                0,
-                id,
-                px,
-                tick_order_qty,
-                TimeInForce::GTX,
-                OrdType::Limit,
-                false,
-            );
+        if !had_cancels && !has_pending {
+            for (id, px) in posts {
+                debug!(
+                    side = "sell",
+                    order_id = id,
+                    price = px,
+                    qty = tick_order_qty,
+                    "post SELL"
+                );
+                hftbacktest::prelude::Bot::submit_sell_order(
+                    hbt,
+                    0,
+                    id,
+                    px,
+                    tick_order_qty,
+                    TimeInForce::GTX,
+                    OrdType::Limit,
+                    false,
+                )
+                .map_err(|operation_error| {
+                    error!(
+                        ?operation_error,
+                        side = "sell",
+                        order_id = id,
+                        "submission failed"
+                    );
+                    ORDER_OPERATION_FAILED
+                })?;
+            }
         }
     }
     Ok(())
@@ -644,14 +760,8 @@ where
             // transform semantics:
             // - SMA/EMA: transform(vamp) is the fair price
             // - ZScore: treat z as alpha on top of mid, with scale
-            let fair = match price_transform {
-                Transform::ZScore { .. } => {
-                    let z = tf.apply(vamp);
-                    mid + z_as_alpha_scale * z
-                }
-                _ => tf.apply(vamp),
-            };
-            fair
+            let transformed = tf.apply(vamp);
+            transformed_fair_price(&price_transform, mid, transformed, z_as_alpha_scale)
         },
         (
             &relative_half_spread,
@@ -717,14 +827,8 @@ where
                 mid
             };
 
-            let fair = match price_transform {
-                Transform::ZScore { .. } => {
-                    let z = tf.apply(wdp);
-                    mid + z_as_alpha_scale * z
-                }
-                _ => tf.apply(wdp),
-            };
-            fair
+            let transformed = tf.apply(wdp);
+            transformed_fair_price(&price_transform, mid, transformed, z_as_alpha_scale)
         },
         (
             &relative_half_spread,
@@ -803,14 +907,8 @@ where
             // VAMP using effective side prices and total side sizes.
             let vamp_eff = (p_eff_bid * sum_qa + p_eff_ask * sum_qb) / (sum_qb + sum_qa);
 
-            let fair = match price_transform {
-                Transform::ZScore { .. } => {
-                    let z = tf.apply(vamp_eff);
-                    mid + z_as_alpha_scale * z
-                }
-                _ => tf.apply(vamp_eff),
-            };
-            fair
+            let transformed = tf.apply(vamp_eff);
+            transformed_fair_price(&price_transform, mid, transformed, z_as_alpha_scale)
         },
         (
             &relative_half_spread,
@@ -1141,10 +1239,18 @@ where
 
         // -------- MUTATIONS (safe: no immutable borrows alive) --------
         for id in cancels {
-            let _ = hbt.cancel(asset, id, false);
+            hbt.cancel(asset, id, false).map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "cancel failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
         for (id, px) in post_bids {
-            let _ = Bot::submit_buy_order(
+            Bot::submit_buy_order(
                 hbt,
                 asset,
                 id,
@@ -1153,10 +1259,20 @@ where
                 TimeInForce::GTX,
                 OrdType::Limit,
                 false,
-            );
+            )
+            .map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "buy",
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "submission failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
         for (id, px) in post_asks {
-            let _ = Bot::submit_sell_order(
+            Bot::submit_sell_order(
                 hbt,
                 asset,
                 id,
@@ -1165,7 +1281,17 @@ where
                 TimeInForce::GTX,
                 OrdType::Limit,
                 false,
-            );
+            )
+            .map_err(|operation_error| {
+                error!(
+                    ?operation_error,
+                    side = "sell",
+                    order_id = id,
+                    strategy = "glft-simplified",
+                    "submission failed"
+                );
+                ORDER_OPERATION_FAILED
+            })?;
         }
 
         // record after updates
@@ -1177,9 +1303,50 @@ where
     Ok(())
 }
 
-/// ------------------------------------------------------------
-/// Your original no-alpha grid for completeness (unchanged)
-/// ------------------------------------------------------------
+/// Signal-free grid strategy with caller-controlled stepping and recording cadence.
+pub fn gridtrading_with_timing<MD, I, R>(
+    hbt: &mut I,
+    recorder: &mut R,
+    relative_half_spread: f64,
+    relative_grid_interval: f64,
+    grid_num: usize,
+    min_grid_step: f64,
+    skew: f64,
+    order_qty: f64,
+    max_position: f64,
+    elapse_ns: i64,
+    record_every: usize,
+) -> Result<(), i64>
+where
+    MD: MarketDepth,
+    I: Bot<MD>,
+    <I as Bot<MD>>::Error: std::fmt::Debug,
+    R: Recorder,
+    <R as Recorder>::Error: std::fmt::Debug,
+{
+    run_loop::<I, R, MD, _>(
+        hbt,
+        recorder,
+        elapse_ns,
+        record_every,
+        move |bot| {
+            let d = bot.depth(0);
+            let mid = 0.5 * (d.best_bid() + d.best_ask()) as f64;
+            mid
+        },
+        (
+            &relative_half_spread,
+            &relative_grid_interval,
+            &grid_num,
+            &min_grid_step,
+            &skew,
+            &order_qty,
+            &max_position,
+        ),
+    )
+}
+
+/// Original signal-free grid interface retained with its historical timing defaults.
 pub fn gridtrading<MD, I, R>(
     hbt: &mut I,
     recorder: &mut R,
@@ -1198,24 +1365,46 @@ where
     R: Recorder,
     <R as Recorder>::Error: std::fmt::Debug,
 {
-    run_loop::<I, R, MD, _>(
+    gridtrading_with_timing::<MD, I, R>(
         hbt,
         recorder,
-        100_000_000, // 100ms
-        10,          // record every 1s
-        move |bot| {
-            let d = bot.depth(0);
-            let mid = 0.5 * (d.best_bid() + d.best_ask()) as f64;
-            mid
-        },
-        (
-            &relative_half_spread,
-            &relative_grid_interval,
-            &grid_num,
-            &min_grid_step,
-            &skew,
-            &order_qty,
-            &max_position,
-        ),
+        relative_half_spread,
+        relative_grid_interval,
+        grid_num,
+        min_grid_step,
+        skew,
+        order_qty,
+        max_position,
+        100_000_000,
+        10,
     )
+}
+
+#[cfg(test)]
+mod safeguard_tests {
+    use super::*;
+
+    #[test]
+    fn hard_cap_limits_remaining_multi_level_exposure() {
+        let buy_levels = allowed_grid_levels(Side::Buy, 4.0, 5.0, 1.0, 5);
+        assert_eq!(buy_levels, 1);
+        assert!(4.0 + buy_levels as f64 <= 5.0);
+
+        let sell_levels = allowed_grid_levels(Side::Sell, -4.0, 5.0, 1.0, 5);
+        assert_eq!(sell_levels, 1);
+        assert!(-4.0 - sell_levels as f64 >= -5.0);
+
+        assert_eq!(allowed_grid_levels(Side::Buy, 5.0, 5.0, 1.0, 5), 0);
+        assert_eq!(allowed_grid_levels(Side::Sell, -5.0, 5.0, 1.0, 5), 0);
+    }
+
+    #[test]
+    fn zscore_scale_changes_the_quote_input_fair_price() {
+        let transform = Transform::ZScore { window: 3 };
+        let low_scale = transformed_fair_price(&transform, 100.0, 1.5, 2.0);
+        let high_scale = transformed_fair_price(&transform, 100.0, 1.5, 4.0);
+        assert_eq!(low_scale, 103.0);
+        assert_eq!(high_scale, 106.0);
+        assert_ne!(low_scale, high_scale);
+    }
 }
