@@ -4,6 +4,7 @@ import copy
 import csv
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GRIDSEARCH_PATH = REPO_ROOT / "pipeline" / "5_gridsearch.py"
-SNAPSHOT_PATH = REPO_ROOT / "pipeline" / "3_snapshot.py"
+SNAPSHOT_MANIFEST_PATH = REPO_ROOT / "pipeline" / "snapshot_manifest.py"
 
 spec = importlib.util.spec_from_file_location("gridsearch", GRIDSEARCH_PATH)
 gridsearch = importlib.util.module_from_spec(spec)
@@ -25,11 +26,13 @@ assert spec.loader is not None
 sys.modules[spec.name] = gridsearch
 spec.loader.exec_module(gridsearch)
 
-snapshot_spec = importlib.util.spec_from_file_location("snapshot_pipeline", SNAPSHOT_PATH)
-snapshot_pipeline = importlib.util.module_from_spec(snapshot_spec)
+snapshot_spec = importlib.util.spec_from_file_location(
+    "snapshot_manifest", SNAPSHOT_MANIFEST_PATH
+)
+snapshot_manifest = importlib.util.module_from_spec(snapshot_spec)
 assert snapshot_spec.loader is not None
-sys.modules[snapshot_spec.name] = snapshot_pipeline
-snapshot_spec.loader.exec_module(snapshot_pipeline)
+sys.modules[snapshot_spec.name] = snapshot_manifest
+snapshot_spec.loader.exec_module(snapshot_manifest)
 
 
 EXCH_EVENT = 1 << 31
@@ -447,6 +450,54 @@ class GridsearchPipelineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "input_manifest does not match"):
                 gridsearch._build_runs(config, phase_mode="test")
 
+    def test_lock_survives_checkout_data_and_output_path_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            original_root = directory / "original-data"
+            moved_root = directory / "moved-data"
+            original_out = directory / "original-output"
+            moved_out = directory / "moved-output"
+
+            config = copy.deepcopy(self.config)
+            config["base_root"] = str(original_root)
+            config["out_path"] = str(original_out)
+            _write_partition_inputs(
+                config,
+                original_root,
+                ("20250101", "20250102", "20250103"),
+            )
+            exploration_runs = gridsearch._build_runs(config, phase_mode="explore")
+            for run in exploration_runs:
+                _write_completed_run(run)
+            summary = gridsearch._summarize(
+                str(original_out),
+                exploration_runs,
+                make_plots=False,
+                usd_per_order=100.0,
+                return_codes={run.name: 0 for run in exploration_runs},
+            )
+            locked = summary[
+                (summary["phase"] == "validation") & (summary["status"] == "ok")
+            ].iloc[0]["candidate_id"]
+
+            shutil.copytree(original_root, moved_root)
+            shutil.copytree(original_out, moved_out)
+            moved_config = copy.deepcopy(config)
+            moved_config["base_root"] = str(moved_root)
+            moved_config["out_path"] = str(moved_out)
+            moved_config["gridsearch"]["locked_candidate"] = [locked]
+
+            test_runs = gridsearch._build_runs(moved_config, phase_mode="test")
+            self.assertEqual(len(test_runs), 1)
+            self.assertEqual(test_runs[0].candidate_id, locked)
+            original_path = str(original_root).replace("\\", "/")
+            for manifest_json in (
+                test_runs[0].candidate_manifest_json,
+                test_runs[0].partition_manifest_json,
+                test_runs[0].input_manifest_json,
+            ):
+                self.assertNotIn(original_path, manifest_json)
+
     def test_real_npz_command_uses_hftbacktest_and_distinct_algorithms(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
@@ -456,12 +507,12 @@ class GridsearchPipelineTests(unittest.TestCase):
             executed = []
             for name, algo, transform, params in (
                 ("obi", "obi-static-alpha", "zscore", {"alpha_scale": 2.0}),
-                ("vamp", "vamp", "ema", {"alpha_scale": 2.0}),
+                ("vamp", "vamp", "zscore", {"alpha_scale": 2.0}),
                 ("vamp-effective", "vamp-effective", "zscore", {"alpha_scale": 3.0}),
                 (
                     "weighted-depth",
                     "weighted-depth",
-                    "sma",
+                    "zscore",
                     {"alpha_scale": 4.0, "target_qty_per_side": 10.0},
                 ),
                 ("baseline", "baseline", "none", {}),
@@ -521,6 +572,47 @@ class GridsearchPipelineTests(unittest.TestCase):
                 executed,
                 ["obi-static-alpha", "vamp", "vamp-effective", "weighted-depth", "baseline"],
             )
+
+    def test_quantized_zero_order_quantity_cannot_emit_success_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            directory = Path(tmpdir)
+            data_path, latency_path, snapshot_path = _write_hftbacktest_fixture(directory)
+            command = gridsearch._build_cmd(
+                binary="cargo",
+                name="invalid-quantity",
+                out_path=str(directory),
+                data_files=[str(data_path)],
+                latency_files=[str(latency_path)],
+                tick_size=1.0,
+                lot_size=1.0,
+                maker_fee=-0.00005,
+                taker_fee=0.0007,
+                queue_power=3.0,
+                grid={
+                    "relative_half_spread": 0.005,
+                    "relative_grid_interval": 0.005,
+                    "grid_num": 2,
+                    "order_qty": 0.1,
+                    "max_position": 2.0,
+                    "skew": 0.0,
+                },
+                time_ctrl={"elapse_ns": 100, "record_every": 1},
+                algo_cfg={"name": "baseline", "params": {}},
+                xform={"kind": "none"},
+                initial_snapshot=str(snapshot_path),
+            )
+            command[1:1] = ["run", "--quiet", "--example", "gridtrading_backtest_args", "--"]
+            result = subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("rounds to zero", result.stderr)
+            self.assertFalse((directory / "invalid-quantity0.csv").exists())
+            self.assertFalse((directory / "invalid-quantity_run_manifest.json").exists())
 
 
     def test_missing_latency_is_rejected_with_migration_note(self) -> None:
@@ -585,36 +677,10 @@ class GridsearchPipelineTests(unittest.TestCase):
             runs = gridsearch._build_runs(config, phase_mode="explore")
             self.assertTrue(runs)
 
-    def test_snapshot_generator_writes_verified_as_of_sidecar(self) -> None:
+    def test_external_snapshot_utility_writes_verified_as_of_sidecar(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             directory = Path(tmpdir)
-            source = directory / "source.npz"
             snapshot = directory / "snapshot.npz"
-            source_events = np.array(
-                [
-                    (
-                        EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | DEPTH_EVENT,
-                        100,
-                        101,
-                        99.0,
-                        10.0,
-                        0,
-                        0,
-                        0.0,
-                    ),
-                    (
-                        EXCH_EVENT | LOCAL_EVENT | SELL_EVENT | DEPTH_EVENT,
-                        199,
-                        200,
-                        101.0,
-                        10.0,
-                        0,
-                        0,
-                        0.0,
-                    ),
-                ],
-                dtype=EVENT_DTYPE,
-            )
             snapshot_events = np.array(
                 [
                     (
@@ -640,17 +706,38 @@ class GridsearchPipelineTests(unittest.TestCase):
                 ],
                 dtype=EVENT_DTYPE,
             )
-            np.savez(source, data=source_events)
             np.savez(snapshot, data=snapshot_events)
 
-            snapshot_pipeline._write_snapshot_manifest(str(snapshot), [str(source)])
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "snapshot_manifest.py",
+                    "--snapshot",
+                    str(snapshot),
+                    "--as-of-ns",
+                    "200",
+                    "--source",
+                    "external-test",
+                ],
+            ):
+                self.assertEqual(snapshot_manifest.main(), 0)
             sidecar = Path(f"{snapshot}.manifest.json")
             manifest = json.loads(sidecar.read_text(encoding="utf-8"))
             self.assertEqual(manifest["schema_version"], 1)
             self.assertEqual(manifest["as_of_ns"], 200)
             self.assertEqual(manifest["snapshot_sha256"], gridsearch._sha256_file(str(snapshot)))
-            self.assertEqual(manifest["source"], "generated-eod")
+            self.assertEqual(manifest["source"], "external-test")
             gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+
+            with self.assertRaisesRegex(ValueError, "logical label, not a path"):
+                snapshot_manifest.write_snapshot_manifest(snapshot, 200, str(directory))
+            manifest["source"] = str(directory)
+            sidecar.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "logical label, not a path"):
+                gridsearch._validate_snapshot_file(str(snapshot), first_replay_ts=201)
+            manifest["source"] = "external-test"
+            sidecar.write_text(json.dumps(manifest), encoding="utf-8")
 
             np.savez(snapshot, data=snapshot_events[:1])
             with self.assertRaisesRegex(ValueError, "snapshot_sha256 does not match"):
@@ -697,6 +784,8 @@ class GridsearchPipelineTests(unittest.TestCase):
             for case, expected in (
                 ("dtype", "expected pinned dtype"),
                 ("flags", "unsupported event flags"),
+                ("l3_kind", "unsupported event flags"),
+                ("trade_without_side", "depth and trade events require one side"),
                 ("price", "depth prices must be finite and positive"),
                 ("quantity", "depth quantities must be finite and positive"),
                 ("nonfinite_price", "depth prices must be finite and positive"),
@@ -717,6 +806,10 @@ class GridsearchPipelineTests(unittest.TestCase):
                             events = archive["data"].copy()
                         if case == "flags":
                             events[0]["ev"] = 0
+                        elif case == "l3_kind":
+                            events[0]["ev"] = EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | 10
+                        elif case == "trade_without_side":
+                            events[0]["ev"] = EXCH_EVENT | LOCAL_EVENT | 2
                         elif case == "price":
                             events[0]["px"] = -1.0
                         elif case == "quantity":
@@ -728,6 +821,13 @@ class GridsearchPipelineTests(unittest.TestCase):
                         np.savez(data_path, data=events)
                     with self.assertRaisesRegex(ValueError, expected):
                         invoke()
+
+            _write_partition_inputs(config, base_root, ("20250101", "20250102"))
+            with np.load(data_path) as archive:
+                valid_trade_events = archive["data"].copy()
+            valid_trade_events[0]["ev"] = EXCH_EVENT | LOCAL_EVENT | BUY_EVENT | 2
+            np.savez(data_path, data=valid_trade_events)
+            self.assertTrue(gridsearch._build_runs(config, phase_mode="explore"))
 
             _write_partition_inputs(config, base_root, ("20250101", "20250102"))
             config["gridsearch"]["skip_existing"] = True
@@ -777,10 +877,26 @@ class GridsearchPipelineTests(unittest.TestCase):
 
     def test_algorithm_parameter_schema_and_output_names_are_strict(self) -> None:
         normalized = gridsearch._normalize_algorithm(
-            {"name": "vamp", "params": {"alpha_scale": "25.0"}}
+            {"name": "vamp", "params": {"alpha_scale": "25.0"}},
+            transform_kind="zscore",
         )
         self.assertEqual(normalized["params"]["alpha_scale"], 25.0)
         self.assertIsInstance(normalized["params"]["alpha_scale"], float)
+
+        for section, field in (
+            ("grid", "random_seed"),
+            ("fees", "fee_currency"),
+            ("defaults", "price_source"),
+        ):
+            with self.subTest(section=section):
+                nested = copy.deepcopy(self.config)
+                nested[section][field] = "unused"
+                with self.assertRaisesRegex(ValueError, f"Unsupported {section} fields"):
+                    gridsearch._validate_config_schema(nested)
+        invalid_transform = copy.deepcopy(self.config)
+        invalid_transform["transform"]["ema_alpha"] = 0.5
+        with self.assertRaisesRegex(ValueError, "ema_alpha requires an ema transform"):
+            gridsearch._validate_config_schema(invalid_transform)
 
         unsupported_mode = copy.deepcopy(self.config)
         unsupported_mode["gridsearch"]["max_position_mode"] = "unsupported-mode"
@@ -812,6 +928,24 @@ class GridsearchPipelineTests(unittest.TestCase):
                 {}, {"name": "vamp", "params": {"look_depth_pct": 0.1}},
                 {"kind": "none"}, None,
             )
+        with self.assertRaisesRegex(ValueError, "alpha_scale is only applicable"):
+            gridsearch._build_cmd(
+                "binary", "name", "out", ["data.npz"], ["latency.npz"],
+                1.0, 1.0, 0.0, 0.0, 3.0,
+                {"relative_half_spread": 0.1, "relative_grid_interval": 0.1,
+                 "grid_num": 1, "order_qty": 1.0, "max_position": 1.0, "skew": 0.0},
+                {}, {"name": "vamp", "params": {"alpha_scale": 2.0}},
+                {"kind": "ema", "ema_alpha": 0.5}, None,
+            )
+        inert_free_command = gridsearch._build_cmd(
+            "binary", "name", "out", ["data.npz"], ["latency.npz"],
+            1.0, 1.0, 0.0, 0.0, 3.0,
+            {"relative_half_spread": 0.1, "relative_grid_interval": 0.1,
+             "grid_num": 1, "order_qty": 1.0, "max_position": 1.0, "skew": 0.0},
+            {}, {"name": "vamp", "params": {}},
+            {"kind": "ema", "ema_alpha": 0.5}, None,
+        )
+        self.assertNotIn("--alpha-scale", inert_free_command)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = copy.deepcopy(self.config)

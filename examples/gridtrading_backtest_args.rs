@@ -176,6 +176,34 @@ fn main() -> Result<(), String> {
     if args.tick_size <= 0.0 || args.lot_size <= 0.0 || args.order_qty <= 0.0 {
         return Err("--tick-size, --lot-size, and --order-qty must be positive".to_string());
     }
+    if !args.tick_size.is_finite()
+        || !args.lot_size.is_finite()
+        || !args.order_qty.is_finite()
+        || !args.max_position.is_finite()
+        || args.max_position <= 0.0
+        || !args.relative_half_spread.is_finite()
+        || args.relative_half_spread < 0.0
+        || !args.relative_grid_interval.is_finite()
+        || args.relative_grid_interval <= 0.0
+        || !args.skew.is_finite()
+        || args.grid_num == 0
+        || args
+            .min_grid_step
+            .is_some_and(|value| !value.is_finite() || value <= 0.0)
+    {
+        return Err("grid and position parameters must be finite and valid".to_string());
+    }
+    let quantized_order_qty = (args.order_qty / args.lot_size).round_ties_even() * args.lot_size;
+    if !quantized_order_qty.is_finite() || quantized_order_qty <= 0.0 {
+        return Err("--order-qty rounds to zero at the configured --lot-size".to_string());
+    }
+    if !args.maker_fee.is_finite()
+        || !args.taker_fee.is_finite()
+        || !args.queue_power.is_finite()
+        || args.queue_power <= 0.0
+    {
+        return Err("fees must be finite and --queue-power must be positive".to_string());
+    }
     match &args.algo {
         Algorithm::Baseline
             if !matches!(&args.transform, TransformKind::None)
@@ -213,6 +241,17 @@ fn main() -> Result<(), String> {
             );
         }
         _ => {}
+    }
+    if matches!(
+        &args.algo,
+        Algorithm::Vamp | Algorithm::VampEffective | Algorithm::WeightedDepth
+    ) && !matches!(&args.transform, TransformKind::Zscore)
+        && args.alpha_scale.is_some()
+    {
+        return Err(
+            "--alpha-scale is only applicable to VAMP/weighted-depth with --transform zscore"
+                .to_string(),
+        );
     }
     let alpha_scale = args.alpha_scale.unwrap_or(50.0);
     let look_depth_pct = args.look_depth_pct.unwrap_or(0.02);
@@ -344,14 +383,15 @@ fn main() -> Result<(), String> {
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            (
-                "vamp",
-                args.transform.as_str(),
+            let parameters = if matches!(&args.transform, TransformKind::Zscore) {
                 format!(
                     "{{\"vamp_depth_pct\":{},\"alpha_scale\":{}}}",
                     vamp_depth_pct, alpha_scale
-                ),
-            )
+                )
+            } else {
+                format!("{{\"vamp_depth_pct\":{vamp_depth_pct}}}")
+            };
+            ("vamp", args.transform.as_str(), parameters)
         }
         Algorithm::VampEffective => {
             grid_vamp_effective_fair(
@@ -371,14 +411,15 @@ fn main() -> Result<(), String> {
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            (
-                "vamp-effective",
-                args.transform.as_str(),
+            let parameters = if matches!(&args.transform, TransformKind::Zscore) {
                 format!(
                     "{{\"vamp_depth_pct\":{},\"alpha_scale\":{}}}",
                     vamp_depth_pct, alpha_scale
-                ),
-            )
+                )
+            } else {
+                format!("{{\"vamp_depth_pct\":{vamp_depth_pct}}}")
+            };
+            ("vamp-effective", args.transform.as_str(), parameters)
         }
         Algorithm::WeightedDepth => {
             grid_weighted_depth_fair(
@@ -398,14 +439,15 @@ fn main() -> Result<(), String> {
                 args.record_every,
             )
             .map_err(|error| format!("HftBacktest strategy failed at {error}"))?;
-            (
-                "weighted-depth",
-                args.transform.as_str(),
+            let parameters = if matches!(&args.transform, TransformKind::Zscore) {
                 format!(
                     "{{\"target_qty_per_side\":{},\"alpha_scale\":{}}}",
                     target_qty_per_side, alpha_scale
-                ),
-            )
+                )
+            } else {
+                format!("{{\"target_qty_per_side\":{target_qty_per_side}}}")
+            };
+            ("weighted-depth", args.transform.as_str(), parameters)
         }
     };
     hbt.close()

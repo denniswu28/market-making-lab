@@ -37,7 +37,7 @@ jobs:
 
       - name: Python checks
         run: |
-          python -m py_compile pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
+          python -m py_compile pipeline/2_latency.py pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py pipeline/snapshot_manifest.py pipeline/snapshot_validator.py ob_backtest.py
           python -m unittest discover -s tests -p 'test_*.py'
 
       - name: Offline synthetic smoke test

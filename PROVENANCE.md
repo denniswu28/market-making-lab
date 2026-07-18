@@ -12,6 +12,7 @@ This repository depends on and adapts the upstream MIT-licensed `nkaz001/hftback
 | `ob_backtest.ipynb` | Upstream tutorial lineage, especially "Market Making with Alpha - Order Book Imbalance" | Historical notebook replaced with an unexecuted synthetic walkthrough to avoid redistributing unsupported claims or local paths. | Documentation-only. |
 | `ob_backtest.py` | Historical notebook export / local orchestration | Retained filename now delegates to the supported synthetic workflow. | Supported offline entry point. |
 | `pipeline/0_ticker.py` through `pipeline/6_*.py` | Upstream Python examples and data-preparation utilities | Repository-specific orchestration around user-supplied data conversion, latency generation, backtest execution, and summarization. | Experimental unless run with user-supplied data under vendor terms. |
+| `pipeline/snapshot_manifest.py` | Repository-owned | Writes and validates a portable hash/as-of sidecar for an externally produced initial-snapshot NPZ file; it does not generate vendor data or the snapshot itself. | Supported utility for the optional external-NPZ workflow. |
 | `pipeline/*.yaml` and `pipeline/templates/*.yaml` | Local configuration layer | Sanitized to portable placeholders or the synthetic public path; destructive cleanup remains opt-in only. | Public-safe configuration examples. |
 | `src/synthetic.rs` | Repository-owned | Deterministic synthetic research harness for validating quote placement, latency, signal warm-up, fees, and inventory behavior without vendor data. | Supported public baseline. |
 

@@ -33,7 +33,6 @@ algo:
 transform:
   kind: "zscore"
   window: 60
-  ema_alpha: 0.1
 out_path: "./out/gridsearch"
 gridsearch:
   rel_half_spread: [0.0005]

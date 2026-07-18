@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
-import hashlib
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+from snapshot_manifest import write_snapshot_manifest_from_sources
 
 # Optional: fetch tick/lot via your helper (SOCKS5 supported)
 try:
@@ -77,47 +77,6 @@ def create_last_snapshot(
         initial_snapshot=initial_snapshot,
         output_snapshot_filename=output_snapshot_filename,
     )
-
-
-def _sha256_file(path: str) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _latest_local_timestamp(data_files: List[str]) -> int:
-    import numpy as np
-
-    latest: Optional[int] = None
-    for path in data_files:
-        with np.load(path, allow_pickle=False) as archive:
-            if "data" not in archive:
-                raise ValueError(f"market-data file is missing the data array: {path}")
-            events = archive["data"]
-        if events.ndim != 1 or events.size == 0 or "local_ts" not in (events.dtype.names or ()):
-            raise ValueError(f"market-data file has no usable local timestamps: {path}")
-        file_latest = int(events["local_ts"].max())
-        latest = file_latest if latest is None else max(latest, file_latest)
-    if latest is None:
-        raise ValueError("cannot write snapshot metadata without source events")
-    return latest
-
-
-def _write_snapshot_manifest(snapshot_path: str, data_files: List[str]) -> None:
-    manifest = {
-        "schema_version": 1,
-        "as_of_ns": _latest_local_timestamp(data_files),
-        "snapshot_sha256": _sha256_file(snapshot_path),
-        "source": "generated-eod",
-    }
-    manifest_path = f"{snapshot_path}.manifest.json"
-    temporary = f"{manifest_path}.tmp"
-    with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(manifest, handle, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-    os.replace(temporary, manifest_path)
 
 
 # ----------------------------- helpers -----------------------------
@@ -273,7 +232,7 @@ def main():
                     initial_snapshot=cur_init,
                     output_snapshot_filename=out_path,
                 )
-                _write_snapshot_manifest(out_path, files_upto_d)
+                write_snapshot_manifest_from_sources(out_path, files_upto_d)
                 # next day starts from this snapshot
                 cur_init = out_path
         else:
@@ -288,7 +247,7 @@ def main():
                 initial_snapshot=initial_snapshot,
                 output_snapshot_filename=out_path,
             )
-            _write_snapshot_manifest(out_path, data_files)
+            write_snapshot_manifest_from_sources(out_path, data_files)
 
     print("[snapshot] Done.")
 

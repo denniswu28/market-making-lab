@@ -87,7 +87,6 @@ def _ensure_dir(p: str) -> None:
 
 def _feed_path(feeds_root: str, exchange: str, symbol: str, yyyymmdd: str) -> str:
     # Matches your previous output root structure created by the converter.
-    # e.g. /data/tmp/tardis_bn_hft/{exchange}/{symbol}/{YYYYMMDD}.npz
     return os.path.join(feeds_root, exchange, symbol, f"{yyyymmdd}.npz")
 
 
@@ -217,7 +216,9 @@ def main():
         cfg = yaml.safe_load(f)
 
     # IO roots
-    feeds_root: str = cfg.get("feeds_root", "/data/tmp/tardis_bn_hft")
+    feeds_root = cfg.get("feeds_root")
+    if not isinstance(feeds_root, str) or not feeds_root.strip():
+        raise ValueError("Provide an explicit portable feeds_root in the YAML configuration.")
     latency_root: str = cfg["latency_root"]
 
     # Universe

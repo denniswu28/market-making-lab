@@ -42,8 +42,9 @@ TRANSFORM_PARAMETER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "ema": {"ema_alpha": 0.1},
     "zscore": {"window": 300},
 }
-EVENT_KINDS = {1, 2, 3, 4, 5, 10, 11, 12, 13}
+EVENT_KINDS = {1, 2, 3, 4, 5}
 DEPTH_KINDS = {1, 4, 5}
+SIDE_REQUIRED_KINDS = {1, 2, 4, 5}
 EVENT_KIND_MASK = 0xFF
 EXCH_EVENT = 1 << 31
 LOCAL_EVENT = 1 << 30
@@ -88,6 +89,27 @@ GRIDSEARCH_CONFIG_FIELDS = {
     "test_dates",
     "locked_candidate",
 }
+FEES_CONFIG_FIELDS = {"maker", "taker"}
+DEFAULTS_CONFIG_FIELDS = {"tick_size", "lot_size"}
+GRID_CONFIG_FIELDS = {
+    "relative_half_spread",
+    "relative_grid_interval",
+    "grid_num",
+    "min_grid_step_override",
+    "skew_override",
+    "order_value_usd",
+    "max_position_in_grids",
+}
+GRID_EXECUTION_FIELDS = {
+    "relative_half_spread",
+    "relative_grid_interval",
+    "grid_num",
+    "min_grid_step_override",
+    "skew",
+    "order_qty",
+    "max_position",
+}
+TRANSFORM_SWEEP_FIELDS = {"kind", "window", "ema_alpha"}
 
 # --------------------------- helpers: dates, files, params ---------------------------
 
@@ -153,6 +175,11 @@ def _file_identity(path: str) -> Dict[str, Any]:
     }
 
 
+def _portable_file_identity(path: str) -> Dict[str, Any]:
+    stat = os.stat(path)
+    return {"size": stat.st_size, "sha256": _sha256_file(path)}
+
+
 def _engine_source_identity() -> Dict[str, Any]:
     digest = hashlib.sha256()
     for relative_path in ENGINE_SOURCE_PATHS:
@@ -170,25 +197,49 @@ def _engine_source_identity() -> Dict[str, Any]:
 
 
 def _binary_identity(binary: str) -> Dict[str, Any]:
-    configured = binary.replace("\\", "/")
     if os.path.isabs(binary) or os.path.dirname(binary):
         resolved = os.path.abspath(binary)
     else:
         resolved = shutil.which(binary) or binary
-    identity: Dict[str, Any] = {
-        "configured": configured,
-        "resolved": os.path.abspath(resolved).replace("\\", "/"),
-    }
     if os.path.isfile(resolved):
-        identity["sha256"] = _sha256_file(resolved)
-    else:
-        identity["sha256"] = "MISSING"
-    return identity
+        return {"sha256": _sha256_file(resolved)}
+    return {"sha256": "MISSING"}
 
 
 def _manifest(value: Dict[str, Any]) -> Tuple[str, str]:
     encoded = _canonical_json(value)
     return encoded, _sha256_text(encoded)
+
+
+def _validate_mapping(
+    value: Any,
+    label: str,
+    allowed: set[str],
+    required: Optional[set[str]] = None,
+) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a mapping")
+    unknown = set(value) - allowed
+    if unknown:
+        raise ValueError(f"Unsupported {label} fields: {sorted(unknown)}")
+    missing = (required or set()) - set(value)
+    if missing:
+        raise ValueError(f"Missing required {label} fields: {sorted(missing)}")
+    return value
+
+
+def _validate_transform_sweep(value: Any, label: str) -> None:
+    transform = _validate_mapping(value, label, TRANSFORM_SWEEP_FIELDS, {"kind"})
+    raw_kinds = transform["kind"]
+    kinds = raw_kinds if isinstance(raw_kinds, (list, tuple)) else [raw_kinds]
+    normalized_kinds = {str(kind).lower() for kind in kinds}
+    unknown_kinds = normalized_kinds - set(TRANSFORM_PARAMETER_DEFAULTS)
+    if unknown_kinds:
+        raise ValueError(f"Unsupported transform kinds in {label}: {sorted(unknown_kinds)}")
+    if "window" in transform and not normalized_kinds.intersection({"sma", "zscore"}):
+        raise ValueError(f"{label}.window requires an sma or zscore transform")
+    if "ema_alpha" in transform and "ema" not in normalized_kinds:
+        raise ValueError(f"{label}.ema_alpha requires an ema transform")
 
 
 def _validate_config_schema(cfg: Dict[str, Any]) -> None:
@@ -216,14 +267,37 @@ def _validate_config_schema(cfg: Dict[str, Any]) -> None:
         raise ValueError(f"Missing required configuration fields: {sorted(missing_root)}")
     if cfg.get("delete_inputs_after", False) is not False:
         raise ValueError("delete_inputs_after must remain false for the public research workflow")
-    gridsearch = cfg["gridsearch"]
-    if not isinstance(gridsearch, dict):
-        raise ValueError("gridsearch must be a mapping")
-    unknown_gridsearch = set(gridsearch) - GRIDSEARCH_CONFIG_FIELDS
-    if unknown_gridsearch:
-        raise ValueError(
-            f"Unsupported gridsearch configuration fields: {sorted(unknown_gridsearch)}"
-        )
+    _validate_mapping(cfg["fees"], "fees", FEES_CONFIG_FIELDS, FEES_CONFIG_FIELDS)
+    _validate_mapping(
+        cfg["defaults"], "defaults", DEFAULTS_CONFIG_FIELDS, DEFAULTS_CONFIG_FIELDS
+    )
+    _validate_mapping(
+        cfg["grid"],
+        "grid",
+        GRID_CONFIG_FIELDS,
+        {
+            "relative_half_spread",
+            "relative_grid_interval",
+            "grid_num",
+            "order_value_usd",
+            "max_position_in_grids",
+        },
+    )
+    _validate_transform_sweep(cfg["transform"], "transform")
+    gridsearch = _validate_mapping(
+        cfg["gridsearch"], "gridsearch configuration", GRIDSEARCH_CONFIG_FIELDS
+    )
+    if "transform" in gridsearch:
+        _validate_transform_sweep(gridsearch["transform"], "gridsearch.transform")
+    _validate_mapping(cfg["algo"], "algo", {"name", "params"}, {"name"})
+    _validate_mapping(cfg["algo"].get("params", {}), "algo.params", set(
+        ALGORITHM_PARAMETER_DEFAULTS.get(str(cfg["algo"].get("name") or "").lower(), {})
+    ))
+    _validate_mapping(
+        gridsearch.get("algo_params", {}),
+        "gridsearch.algo_params",
+        set(ALGORITHM_PARAMETER_DEFAULTS.get(str(cfg["algo"].get("name") or "").lower(), {})),
+    )
     skew_mode = gridsearch.get("skew_mode", "rel_over_n")
     if skew_mode not in {"rel_over_n", "fixed"}:
         raise ValueError("gridsearch.skew_mode must be 'rel_over_n' or 'fixed'")
@@ -244,7 +318,9 @@ def _validate_config_schema(cfg: Dict[str, Any]) -> None:
         raise ValueError("record_every must be positive")
 
 
-def _normalize_algorithm(algo_cfg: Dict[str, Any]) -> Dict[str, Any]:
+def _normalize_algorithm(
+    algo_cfg: Dict[str, Any], transform_kind: Optional[str] = None
+) -> Dict[str, Any]:
     unknown_top_level = set(algo_cfg) - {"name", "params"}
     if unknown_top_level:
         raise ValueError(f"Unsupported algorithm fields: {sorted(unknown_top_level)}")
@@ -262,6 +338,11 @@ def _normalize_algorithm(algo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     if unknown:
         raise ValueError(f"Unsupported parameters for {name}: {sorted(unknown)}")
     params = {**ALGORITHM_PARAMETER_DEFAULTS[name], **supplied}
+    if name in {"vamp", "vamp-effective", "weighted-depth"} and transform_kind is not None:
+        if transform_kind != "zscore":
+            if "alpha_scale" in supplied:
+                raise ValueError(f"{name}.alpha_scale is only applicable to transform=zscore")
+            params.pop("alpha_scale", None)
     if "normalize" in params and not isinstance(params["normalize"], bool):
         raise ValueError(f"{name}.normalize must be a boolean")
     for key in ("look_depth_pct", "vamp_depth_pct", "target_qty_per_side", "alpha_scale"):
@@ -278,6 +359,43 @@ def _normalize_algorithm(algo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     if "alpha_scale" in params and not math.isfinite(params["alpha_scale"]):
         raise ValueError(f"{name}.alpha_scale must be finite")
     return {"name": name, "params": params}
+
+
+def _normalize_executed_grid(grid: Dict[str, Any]) -> Dict[str, Any]:
+    unknown = set(grid) - GRID_EXECUTION_FIELDS - {"order_value_usd", "max_position_in_grids", "skew_override"}
+    if unknown:
+        raise ValueError(f"Unsupported executed grid fields: {sorted(unknown)}")
+    required = GRID_EXECUTION_FIELDS - {"min_grid_step_override"}
+    missing = required - set(grid)
+    if missing:
+        raise ValueError(f"Missing executed grid fields: {sorted(missing)}")
+    normalized: Dict[str, Any] = {
+        "relative_half_spread": float(grid["relative_half_spread"]),
+        "relative_grid_interval": float(grid["relative_grid_interval"]),
+        "grid_num": int(grid["grid_num"]),
+        "skew": float(grid["skew"]),
+        "order_qty": float(grid["order_qty"]),
+        "max_position": float(grid["max_position"]),
+        "min_grid_step_override": (
+            None
+            if grid.get("min_grid_step_override") is None
+            else float(grid["min_grid_step_override"])
+        ),
+    }
+    for key in ("relative_half_spread", "skew"):
+        if not math.isfinite(normalized[key]):
+            raise ValueError(f"grid.{key} must be finite")
+    for key in ("relative_grid_interval", "order_qty", "max_position"):
+        if not math.isfinite(normalized[key]) or normalized[key] <= 0:
+            raise ValueError(f"grid.{key} must be positive and finite")
+    if normalized["relative_half_spread"] < 0:
+        raise ValueError("grid.relative_half_spread must be non-negative")
+    if normalized["grid_num"] <= 0:
+        raise ValueError("grid.grid_num must be positive")
+    min_grid_step = normalized["min_grid_step_override"]
+    if min_grid_step is not None and (not math.isfinite(min_grid_step) or min_grid_step <= 0):
+        raise ValueError("grid.min_grid_step_override must be positive and finite")
+    return normalized
 
 
 def _normalize_transform(xform: Dict[str, Any], algorithm: str) -> Dict[str, Any]:
@@ -326,16 +444,16 @@ def _algo_tag(algo_cfg: Dict[str, Any]) -> str:
         return f"obi-{nflag}-ld{ld}-c{c}"
     if nm == "vamp":
         dp = f(p.get("vamp_depth_pct", 0.02))
-        c = f(p.get("alpha_scale", 50.0))
-        return f"vamp-dp{dp}-c{c}"
+        scale = f"-c{f(p['alpha_scale'])}" if "alpha_scale" in p else ""
+        return f"vamp-dp{dp}{scale}"
     if nm == "vamp-effective":
         dp = f(p.get("vamp_depth_pct", 0.02))
-        c = f(p.get("alpha_scale", 50.0))
-        return f"vampe-dp{dp}-c{c}"
+        scale = f"-c{f(p['alpha_scale'])}" if "alpha_scale" in p else ""
+        return f"vampe-dp{dp}{scale}"
     if nm == "weighted-depth":
         t = f(p.get("target_qty_per_side", 500.0))
-        c = f(p.get("alpha_scale", 50.0))
-        return f"wdepth-t{t}-c{c}"
+        scale = f"-c{f(p['alpha_scale'])}" if "alpha_scale" in p else ""
+        return f"wdepth-t{t}{scale}"
     if nm == "glft-simple":
         w = int(p.get("glft_vol_window", 6000))
         s = f(p.get("glft_vol_scale", 0.5))
@@ -476,9 +594,12 @@ def _validate_event_file(path: str, label: str = "market-data file") -> Dict[str
     sides = flags & np.uint64(BUY_EVENT | SELL_EVENT)
     if np.any(sides == np.uint64(BUY_EVENT | SELL_EVENT)):
         raise ValueError(f"invalid HftBacktest {label} {path}: event cannot be both buy and sell")
+    side_required_rows = np.isin(kinds, list(SIDE_REQUIRED_KINDS))
+    if np.any(side_required_rows & (sides == 0)):
+        raise ValueError(
+            f"invalid HftBacktest {label} {path}: depth and trade events require one side"
+        )
     depth_rows = np.isin(kinds, list(DEPTH_KINDS))
-    if np.any(depth_rows & (sides == 0)):
-        raise ValueError(f"invalid HftBacktest {label} {path}: depth events require one side")
 
     exch_ts = events["exch_ts"]
     local_ts = events["local_ts"]
@@ -579,11 +700,21 @@ def _validate_snapshot_file(path: str, first_replay_ts: int) -> Dict[str, Any]:
         raise ValueError("initial snapshot as_of_ns must be earlier than the first replay event")
     if manifest.get("snapshot_sha256") != _sha256_file(path):
         raise ValueError("initial snapshot manifest snapshot_sha256 does not match the snapshot")
-    if "source" in manifest and not isinstance(manifest["source"], str):
-        raise ValueError("initial snapshot manifest source must be a string when provided")
+    if "source" in manifest:
+        source = manifest["source"]
+        if (
+            not isinstance(source, str)
+            or not source.strip()
+            or "/" in source
+            or "\\" in source
+            or ":" in source
+        ):
+            raise ValueError(
+                "initial snapshot manifest source must be a non-empty logical label, not a path"
+            )
     return {
         "manifest": manifest,
-        "manifest_file": _file_identity(manifest_path),
+        "manifest_file": _portable_file_identity(manifest_path),
     }
 
 
@@ -601,26 +732,9 @@ def _partition_manifest(cfg: Dict[str, Any], symbol: str) -> Dict[str, Any]:
     for phase, dates in _date_partitions(cfg):
         partitions[phase] = {
             "dates": dates,
-            "data_files": [
-                os.path.abspath(_files_for(cfg["base_root"], cfg["exchange"], symbol, date)["data"])
-                .replace("\\", "/")
-                for date in dates
-            ],
-            "latency_files": [
-                os.path.abspath(_files_for(cfg["base_root"], cfg["exchange"], symbol, date)["lat"])
-                .replace("\\", "/")
-                for date in dates
-            ],
-            "initial_snapshot": (
-                {
-                    "path": os.path.abspath(_snapshot_path(cfg, symbol, dates[0])).replace("\\", "/"),
-                    "manifest_path": os.path.abspath(
-                        _snapshot_manifest_path(_snapshot_path(cfg, symbol, dates[0]))
-                    ).replace("\\", "/"),
-                }
-                if _snapshot_path(cfg, symbol, dates[0]) is not None
-                else None
-            ),
+            "data_roles": [{"date": date, "kind": "market-data"} for date in dates],
+            "latency_roles": [{"date": date, "kind": "order-latency"} for date in dates],
+            "initial_snapshot_required": _snapshot_path(cfg, symbol, dates[0]) is not None,
         }
     return {
         "schema_version": 1,
@@ -642,10 +756,13 @@ def _input_manifest(
         "schema_version": 1,
         "phase": phase,
         "symbol": symbol,
-        "data_files": [_file_identity(path) for path in data_files],
-        "latency_files": [_file_identity(path) for path in latency_files],
+        "data_files": [_portable_file_identity(path) for path in data_files],
+        "latency_files": [_portable_file_identity(path) for path in latency_files],
         "initial_snapshot": (
-            {"snapshot_file": _file_identity(initial_snapshot), **(snapshot_metadata or {})}
+            {
+                "snapshot_file": _portable_file_identity(initial_snapshot),
+                **(snapshot_metadata or {}),
+            }
             if initial_snapshot
             else None
         ),
@@ -702,8 +819,10 @@ def _build_cmd(
             "HftBacktest grid search requires --latency-files; generate user-supplied latency "
             "data before running this research path"
         )
-    algo_cfg = _normalize_algorithm(algo_cfg)
-    xform = _normalize_transform(xform, algo_cfg["name"])
+    algorithm_name = str(algo_cfg.get("name") or "").lower()
+    xform = _normalize_transform(xform, algorithm_name)
+    algo_cfg = _normalize_algorithm(algo_cfg, xform["kind"])
+    grid = _normalize_executed_grid(grid)
     args: List[str] = [
         binary,
         "--name", name,
@@ -750,15 +869,13 @@ def _build_cmd(
         if p.get("normalize", True):
             args += ["--normalize"]
     elif name_algo in ("vamp", "vamp-effective"):
-        args += [
-            "--vamp-depth-pct", str(p["vamp_depth_pct"]),
-            "--alpha-scale", str(p["alpha_scale"]),
-        ]
+        args += ["--vamp-depth-pct", str(p["vamp_depth_pct"])]
+        if "alpha_scale" in p:
+            args += ["--alpha-scale", str(p["alpha_scale"])]
     elif name_algo == "weighted-depth":
-        args += [
-            "--target-qty-per-side", str(p["target_qty_per_side"]),
-            "--alpha-scale", str(p["alpha_scale"]),
-        ]
+        args += ["--target-qty-per-side", str(p["target_qty_per_side"])]
+        if "alpha_scale" in p:
+            args += ["--alpha-scale", str(p["alpha_scale"])]
 
     # variable-length files last
     args += ["--data-files", *data_files]
@@ -965,8 +1082,8 @@ def _validate_locked_validation(out_path: str, expected: RunSpec) -> None:
     _, artifact_manifest_sha256 = _validate_existing_artifacts(expected)
     if record["artifact_manifest_sha256"] != artifact_manifest_sha256:
         raise ValueError("validation summary artifact fingerprint does not match the current files")
-    if os.path.abspath(record["csv"]) != os.path.abspath(_expected_result_csv(expected)):
-        raise ValueError("validation summary CSV path does not match the locked validation artifact")
+    if os.path.basename(record["csv"]) != os.path.basename(_expected_result_csv(expected)):
+        raise ValueError("validation summary CSV name does not match the locked validation artifact")
 
 
 def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpec]:
@@ -1100,15 +1217,18 @@ def _build_runs(cfg: Dict[str, Any], phase_mode: str = "explore") -> List[RunSpe
                 if mp_mode == "equal_to_grid_num":
                     g["max_position"] = g["order_qty"] * n
 
-                algo_cfg = dict(cfg["algo"])
-                algo_cfg["params"] = dict(algo_cfg.get("params") or {})
+                raw_algo_cfg = dict(cfg["algo"])
+                raw_algo_cfg["params"] = dict(raw_algo_cfg.get("params") or {})
                 for k, v in combo.items():
                     if k.startswith("algo::"):
-                        algo_cfg["params"][k.split("::", 1)[1]] = v
-                algo_cfg = _normalize_algorithm(algo_cfg)
+                        raw_algo_cfg["params"][k.split("::", 1)[1]] = v
+
+                g = _normalize_executed_grid(g)
 
                 for xf in xform_variants:
-                    xform = _normalize_transform(dict(xf), algo_cfg["name"])
+                    algorithm_name = str(raw_algo_cfg.get("name") or "").lower()
+                    xform = _normalize_transform(dict(xf), algorithm_name)
+                    algo_cfg = _normalize_algorithm(raw_algo_cfg, xform["kind"])
                     candidate_manifest_json, candidate_manifest_sha256 = _manifest(
                         _candidate_manifest(
                             cfg,
@@ -1229,15 +1349,13 @@ def _expected_rust_manifest(spec: RunSpec) -> Dict[str, Any]:
             "alpha_scale": params["alpha_scale"],
         }
     elif name in ("vamp", "vamp-effective"):
-        executed_parameters = {
-            "vamp_depth_pct": params["vamp_depth_pct"],
-            "alpha_scale": params["alpha_scale"],
-        }
+        executed_parameters = {"vamp_depth_pct": params["vamp_depth_pct"]}
+        if "alpha_scale" in params:
+            executed_parameters["alpha_scale"] = params["alpha_scale"]
     elif name == "weighted-depth":
-        executed_parameters = {
-            "target_qty_per_side": params["target_qty_per_side"],
-            "alpha_scale": params["alpha_scale"],
-        }
+        executed_parameters = {"target_qty_per_side": params["target_qty_per_side"]}
+        if "alpha_scale" in params:
+            executed_parameters["alpha_scale"] = params["alpha_scale"]
     else:
         raise ValueError(f"Unsupported algo: {name}")
 
@@ -1351,12 +1469,20 @@ def _artifact_manifest_payload(spec: RunSpec) -> Dict[str, Any]:
         "partition_manifest_sha256": spec.partition_manifest_sha256,
         "input_manifest_json": spec.input_manifest_json,
         "input_manifest_sha256": spec.input_manifest_sha256,
-        "command": _command_for_spec(spec),
-        "result_csv": _file_identity(result_csv),
+        "result_csv": _portable_file_identity(result_csv),
         "result_validation": result_validation,
         "rust_manifest": rust_manifest,
-        "rust_manifest_file": _file_identity(_rust_manifest_path(spec)),
+        "rust_manifest_file": _portable_file_identity(_rust_manifest_path(spec)),
+        "provenance_paths": {
+            "command": _command_for_spec(spec),
+            "result_csv": _file_identity(result_csv),
+            "rust_manifest_file": _file_identity(_rust_manifest_path(spec)),
+        },
     }
+
+
+def _artifact_integrity_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in payload.items() if key != "provenance_paths"}
 
 
 def _write_artifact_manifest(spec: RunSpec) -> None:
@@ -1379,9 +1505,9 @@ def _validate_existing_artifacts(spec: RunSpec) -> Tuple[Dict[str, Any], str]:
     except (OSError, ValueError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid grid-search artifact manifest: {path}") from error
     expected = _artifact_manifest_payload(spec)
-    if actual != expected:
+    if _artifact_integrity_payload(actual) != _artifact_integrity_payload(expected):
         raise ValueError(f"grid-search artifact manifest does not match current run: {path}")
-    return actual, _sha256_file(path)
+    return actual, _sha256_text(_canonical_json(_artifact_integrity_payload(actual)))
 
 
 def _run_one(spec: RunSpec) -> Tuple[RunSpec, int]:

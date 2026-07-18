@@ -10,6 +10,12 @@ def main():
     ap.add_argument("--snapshot", required=True)
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--tickers-json", required=True)
+    ap.add_argument(
+        "--data-files",
+        nargs="+",
+        required=True,
+        help="Explicit HftBacktest NPZ files used to validate the snapshot",
+    )
     args = ap.parse_args()
 
     tj = json.load(open(args.tickers_json))
@@ -23,14 +29,7 @@ def main():
             .tick_size(ts)
             .lot_size(ls)
             .initial_snapshot(args.snapshot)
-            .data(
-                [
-                    "/data/tmp/tardis_bn_hft/data/binance-futures/SOLUSDT/SOLUSDT_{}.npz".format(
-                        date
-                    )
-                    for date in range(20250201, 20250210)
-                ]
-            )
+            .data(args.data_files)
             .roi_lb(0.0)
             .roi_ub(1000.0)
         ]

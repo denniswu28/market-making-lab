@@ -21,6 +21,8 @@ How can order-book and short-horizon statistical signals be incorporated into an
 - `src/synthetic.rs` contains the repository-owned synthetic event-driven lab used for the public example and invariant tests.
 - `src/algo.rs` and the Rust examples remain the adaptation boundary to upstream `hftbacktest` concepts and APIs.
 - `pipeline/4_backtest.py` is the supported Python entry point for the synthetic public workflow.
+- `pipeline/5_gridsearch.py` validates and consumes externally produced level-2 HftBacktest NPZ files for the optional research workflow.
+- `pipeline/snapshot_manifest.py` creates the required integrity sidecar for an externally produced initial-snapshot NPZ file.
 - `pipeline/*.yaml` now use portable placeholders for optional user-supplied real-data research only.
 
 ## Dennis Wu's demonstrated contribution in this repository
@@ -49,15 +51,23 @@ The output is a reproducible simulation artifact, not investment performance and
 
 ## Optional user-supplied real-data path
 
-The numbered `pipeline/` conversion and latency scripts are kept only as optional, user-run research scaffolding for self-supplied data under the user's own vendor terms. Current repository evidence demonstrates Tardis conversion and Binance Futures metadata/data paths. Do **not** treat the repository as verified general Binance or OKX production integration.
+The only workflow supported from a fresh clone is the synthetic quick start above. The optional
+grid-search workflow starts from externally produced, user-supplied HftBacktest NPZ files. This
+repository validates and consumes those files; it does not claim that vendor download, conversion,
+latency generation, or snapshot generation is reproducible from a fresh clone. The older numbered
+conversion, latency, and snapshot scripts remain legacy research scaffolding and require a separately
+managed upstream HftBacktest environment and data obtained under the user's own vendor terms.
+Current repository evidence demonstrates Tardis conversion and Binance Futures metadata/data paths.
+Do **not** treat the repository as verified general Binance or OKX production integration.
 
-The optional grid search uses the pinned upstream HftBacktest APIs and requires `.npz` market-data,
-latency, and (when configured) initial-snapshot files in the exact pinned upstream schema. Before
-launching Rust, it rejects empty arrays, unknown event flags, invalid sides, non-finite or non-positive
-depth prices or quantities, non-monotonic timestamps, `local_ts < exch_ts`, and invalid
-request/exchange/response latency ordering. It does not accept the CSV fixture; use the synthetic
-quick start for that workflow. Its Python analysis dependencies are isolated from the default
-installation:
+The optional grid search uses the pinned upstream HftBacktest APIs and requires exact level-2 `.npz`
+market-data and latency files, plus an optional initial-snapshot NPZ file, in the pinned upstream
+schema. It accepts only level-2 depth and trade event kinds; depth and trade events require valid side
+semantics. Before launching Rust, it rejects empty arrays, unsupported event kinds, invalid sides,
+non-finite or non-positive depth prices or quantities, non-monotonic timestamps,
+`local_ts < exch_ts`, and invalid request/exchange/response latency ordering. It does not accept the
+CSV fixture; use the synthetic quick start for that workflow. Its Python analysis dependencies are
+isolated from the default installation:
 
 ```bash
 python -m pip install -r requirements-research.txt
@@ -65,11 +75,21 @@ cargo build --release --example gridtrading_backtest_args
 python pipeline/5_gridsearch.py --phase explore -c pipeline/gridsearch_config.yaml
 ```
 
-When `initial_snapshot` is configured, each snapshot must have a JSON sidecar named
-`<snapshot>.manifest.json`. `pipeline/3_snapshot.py` writes this sidecar automatically with:
+When `initial_snapshot` is configured, the externally produced snapshot must have a JSON sidecar
+named `<snapshot>.manifest.json`. Create it only after independently verifying the snapshot's
+as-of timestamp and data provenance:
+
+```bash
+python pipeline/snapshot_manifest.py \
+  --snapshot /path/to/snapshot.npz \
+  --as-of-ns 1735689599999999999 \
+  --source external-research-snapshot
+```
+
+The `source` value is a logical provenance label, not a machine-specific path. The command writes:
 
 ```json
-{"as_of_ns": 1735689599999999999, "schema_version": 1, "snapshot_sha256": "<sha256>", "source": "generated-eod"}
+{"as_of_ns": 1735689599999999999, "schema_version": 1, "snapshot_sha256": "<sha256>", "source": "external-research-snapshot"}
 ```
 
 The grid search verifies the sidecar hash, requires `as_of_ns` to cover every event stored in the
@@ -98,8 +118,15 @@ the candidate's strategy, fees, queue model, timing, engine source and binary id
 partition plan, validation inputs, and exact validation artifacts before test execution. Retain the
 validation inputs and artifacts until the held-out test is complete. `--skip-existing` resumes only
 artifacts whose manifests and exact result files still match the current run specification. These
-local manifests contain resolved input paths and content hashes; keep the ignored `out/` directory
+manifests use content identities and logical partitions for reproducibility across checkout and data
+roots. Resolved paths are retained only as non-locking provenance. Keep the ignored `out/` directory
 private and do not commit user-data research artifacts.
+
+For VAMP, effective VAMP, and weighted-depth signals, `alpha_scale` is executed only with the
+`zscore` transform. Supplying it with a non-z-score transform is rejected instead of silently
+creating duplicate candidates. The Rust adapter treats `max_position` as a hard inventory boundary:
+it limits new grid levels by remaining capacity, defers replacement submissions while same-side
+operations are pending, and fails the run when a required cancel or submission fails.
 
 ## Tested assumptions and limitations
 
@@ -110,7 +137,7 @@ The public synthetic workflow explicitly assumes:
 - no lookahead in OBI warm-up or signal standardization;
 - full-fill/no-partial-fill behavior once the synthetic book crosses a resting quote;
 - maker-fee accounting with signed fees or rebates;
-- inventory caps enforced by suppressing any same-side quote that would exceed the cap;
+- inventory caps enforced as a hard boundary by sizing the active grid to remaining capacity;
 - cancellations and replacements applied when a new desired quote differs from the currently active quote.
 
 The supported public example is intentionally narrow:
@@ -124,7 +151,7 @@ The supported public example is intentionally narrow:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features
-python -m py_compile pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py ob_backtest.py
+python -m py_compile pipeline/2_latency.py pipeline/3_snapshot.py pipeline/4_backtest.py pipeline/5_gridsearch.py pipeline/snapshot_manifest.py pipeline/snapshot_validator.py ob_backtest.py
 python -m unittest discover -s tests -p 'test_*.py'
 python pipeline/4_backtest.py -c pipeline/backtest_config.yaml
 ```
