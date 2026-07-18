@@ -1,4 +1,4 @@
-# statmm
+# Market-Making Lab
 
 Event-driven market-making research lab for testing order-book signals, latency, queue assumptions, inventory controls, and execution costs with reproducible synthetic examples.
 
